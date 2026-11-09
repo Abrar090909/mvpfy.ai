@@ -20,6 +20,7 @@ import {
 } from '../lib/agentRunner';
 import { Feature1McpClient, mcpBaseUrl } from '../lib/feature1Mcp';
 import { preflightAuth } from '../lib/cliCheck';
+import { sessionPlan } from '../lib/featureSession';
 import { redactSecrets } from '../lib/raiseFailure';
 import { quotaExhausted, quotaResetAt } from '../lib/quota';
 import { nextAttemptAt, waitFor } from '../lib/quotaWait';
@@ -531,25 +532,31 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
    * read back out of the output; everything after it resumes that.
    */
   const sessionFor = useCallback(
-    (slug: string, open: boolean): RunSession | undefined => {
+    (slug: string, open: boolean, reopen = false): RunSession | undefined => {
       const existing = project.featureSessions?.[slug];
-      if (state.settings.defaultAgent === 'codex') {
-        return existing ? { id: existing, resume: true } : undefined;
-      }
-      if (state.settings.defaultAgent !== 'claude') return undefined;
-      if (existing && !open) return { id: existing, resume: true };
-      const id = existing && open ? existing : crypto.randomUUID();
-      if (id !== existing) {
+      const session = sessionPlan({
+        agent: state.settings.defaultAgent,
+        existing,
+        open,
+        reopen,
+        newId: () => crypto.randomUUID(),
+      });
+      // `reopen` is the repair for a conversation that was not there: the
+      // caller says so outright, because the alternative — noticing that
+      // state has been cleared — loses the race with its own update and
+      // resumes the dead id all over again.
+      const id = session && !session.resume ? session.id : existing;
+      if (session && !session.resume && id !== existing) {
         updateState((prev) => ({
           ...prev,
           projects: prev.projects.map((p) =>
             p.id === project.id
-              ? { ...p, featureSessions: { ...(p.featureSessions ?? {}), [slug]: id } }
+              ? { ...p, featureSessions: { ...(p.featureSessions ?? {}), [slug]: id! } }
               : p
           ),
         }));
       }
-      return { id, resume: false };
+      return session;
     },
     [project.id, project.featureSessions, state.settings.defaultAgent, updateState]
   );
@@ -582,7 +589,8 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
   // Held in a ref because implementStory is declared further down; reading it
   // directly here would be a use before declaration.
   const implementStoryRef = useRef<
-    ((code: string, continuing?: boolean) => Promise<boolean>) | null
+    | ((code: string, continuing?: boolean, forSlug?: string, reopen?: boolean) => Promise<boolean>)
+    | null
   >(null);
   const processedFailures = useRef(new Set<string>());
   // One automatic retry per feature, so a conversation that was never there
@@ -606,7 +614,13 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
       ) {
         reopened.current.add(slug);
         const code = run.handle.storyId;
-        queueMicrotask(() => void implementStoryRef.current?.(code, true));
+        // `true` at the end is the point: the retry asks for a NEW
+        // conversation rather than hoping forgetSession's state update has
+        // committed. It has not — this runs in a microtask, before React
+        // re-renders — so without it the retry resumed the same dead id out
+        // of a stale closure and failed identically, spending the one
+        // automatic attempt on nothing.
+        queueMicrotask(() => void implementStoryRef.current?.(code, true, slug, true));
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1283,7 +1297,7 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
    * several it is not, and the chain that starts the next story would have put
    * it in whatever feature the builder had clicked on meanwhile.
    */
-  const implementStory = (code: string, continuing = false, forSlug?: string) =>
+  const implementStory = (code: string, continuing = false, forSlug?: string, reopen = false) =>
     guarded(async () => {
       const slug = forSlug ?? activePlan?.slug ?? '';
       const plan = plans.find((pl) => pl.slug === slug)?.plan;
@@ -1346,7 +1360,7 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
         story.feedback,
         story.feature1StoryId,
         mcp,
-        sessionFor(slug, false),
+        sessionFor(slug, false, reopen),
         trees.ok ? (trees.paths ?? {}) : {},
         continuing,
         plan.design
