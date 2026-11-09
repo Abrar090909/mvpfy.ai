@@ -26,19 +26,101 @@ export function winShellArgs(command: string): string[] {
 
 const WIN_SHELL = () => process.env.ComSpec || 'cmd.exe';
 
+/**
+ * `env -0` output: NUL between entries, the first `=` splitting each one.
+ *
+ * NUL-separated rather than line-separated because a value may legitimately
+ * contain a newline, and a line parser silently truncates it.
+ */
+export function parseEnvDump(dump: string): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const entry of dump.split('\0')) {
+    if (!entry) continue;
+    const at = entry.indexOf('=');
+    if (at <= 0) continue;
+    out[entry.slice(0, at)] = entry.slice(at + 1);
+  }
+  return out;
+}
+
+/**
+ * The environment a login shell would have given us, worked out ONCE.
+ *
+ * A GUI app launched from Finder gets a minimal PATH, so every command used
+ * to run through `zsh -lc` to pick up Homebrew, nvm and the rest. That is
+ * correct and it is extremely expensive: measured on a developer's machine,
+ * `git rev-parse` costs 11ms on its own and 101ms through a login shell —
+ * the profile is sourced, nvm and all, before the command starts. mvpfy
+ * fires twenty to thirty small commands on a single refresh, so it was
+ * paying two to three seconds of shell start-up to do a quarter-second of
+ * work. That is why a faster machine did not help.
+ *
+ * So the profile is sourced once, its environment kept, and every command
+ * afterwards runs with a plain `-c` and that environment. Same tools found,
+ * one cost instead of thousands.
+ */
+let cachedLoginEnv: NodeJS.ProcessEnv | null = null;
+let loginEnvResolved = false;
+
+export function resolveLoginEnv(): NodeJS.ProcessEnv {
+  if (loginEnvResolved) return cachedLoginEnv ?? process.env;
+  loginEnvResolved = true;
+  if (IS_WIN) return process.env;
+  try {
+    const res = spawnSync(USER_SHELL, ['-lc', 'env -0'], {
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    const parsed = res.status === 0 ? parseEnvDump(res.stdout ?? '') : {};
+    // A PATH is the whole point; without one the dump is not worth trusting
+    // and the old behaviour is better than a broken environment.
+    if (parsed.PATH) cachedLoginEnv = { ...process.env, ...parsed };
+  } catch {
+    // Falls back below, which is what mvpfy did before this existed.
+  }
+  return cachedLoginEnv ?? process.env;
+}
+
+/** True when the profile was read and can be reused. Falls back if not. */
+function haveLoginEnv(): boolean {
+  resolveLoginEnv();
+  return cachedLoginEnv !== null;
+}
+
+/** Only for tests: forget what was resolved. */
+export function forgetLoginEnv(): void {
+  cachedLoginEnv = null;
+  loginEnvResolved = false;
+}
+
 export function spawnShell(command: string, opts: Parameters<typeof spawn>[2]): ChildProcess {
-  return IS_WIN
-    ? spawn(WIN_SHELL(), winShellArgs(command), { ...opts, windowsVerbatimArguments: true })
-    : spawn(USER_SHELL, ['-lc', command], opts);
+  if (IS_WIN) {
+    return spawn(WIN_SHELL(), winShellArgs(command), { ...opts, windowsVerbatimArguments: true });
+  }
+  if (!haveLoginEnv()) return spawn(USER_SHELL, ['-lc', command], opts);
+  // The caller's own env wins: it is asking for something specific, such as
+  // the Docker context or a git prompt being turned off.
+  return spawn(USER_SHELL, ['-c', command], {
+    ...opts,
+    env: { ...resolveLoginEnv(), ...(opts?.env ?? {}) },
+  });
 }
 
 export function spawnShellSync(
   command: string,
   opts: { encoding: 'utf8'; timeout: number; env?: NodeJS.ProcessEnv; cwd?: string }
 ) {
-  return IS_WIN
-    ? spawnSync(WIN_SHELL(), winShellArgs(command), { ...opts, windowsVerbatimArguments: true })
-    : spawnSync(USER_SHELL, ['-lc', command], opts);
+  if (IS_WIN) {
+    return spawnSync(WIN_SHELL(), winShellArgs(command), {
+      ...opts,
+      windowsVerbatimArguments: true,
+    });
+  }
+  if (!haveLoginEnv()) return spawnSync(USER_SHELL, ['-lc', command], opts);
+  return spawnSync(USER_SHELL, ['-c', command], {
+    ...opts,
+    env: { ...resolveLoginEnv(), ...(opts.env ?? {}) },
+  });
 }
 
 /**

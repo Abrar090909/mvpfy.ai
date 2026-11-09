@@ -2,6 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { extractPrUrl, RunHandle } from './agentRunner';
 import { loadRunHistory, mergeHistory, saveRunHistory } from './runHistory';
 
+/**
+ * How long chunks are gathered before React is told. Short enough that a
+ * streaming log still looks live, long enough that sixty chunks a second
+ * become six renders.
+ */
+const LOG_FLUSH_MS = 100;
+
 export interface RunState {
   handle: RunHandle;
   log: string;
@@ -44,21 +51,60 @@ export function useRuns(onRunFinished?: (run: RunState) => void): RunsApi {
     savedSignature.current = signature;
     saveRunHistory(mergeHistory(saved, Object.values(runs)));
   }, [runs, saved]);
+  /** Chunks waiting to be applied, by run, and the timer that applies them. */
+  const pending = useRef(new Map<string, string[]>());
+  const flushTimer = useRef<number | null>(null);
   const finishedCb = useRef(onRunFinished);
   useEffect(() => {
     finishedCb.current = onRunFinished;
   }, [onRunFinished]);
 
   useEffect(() => {
-    const offOutput = window.mvpfy.onRunOutput((ev) => {
+    // Output arrives a chunk at a time, and a chunk is small and frequent:
+    // an agent or a docker build produces dozens a second. Setting state on
+    // each one re-rendered every mounted tab — the app keeps them all
+    // mounted — and rebuilt a 200,000 character string each time, which is
+    // what made the whole window feel heavy while anything was running.
+    //
+    // So chunks are gathered and applied on a frame-ish interval. The log
+    // still arrives in order and still ends up identical; it just stops
+    // asking React about it sixty times a second.
+    const flush = () => {
+      if (flushTimer.current !== null) {
+        window.clearTimeout(flushTimer.current);
+        flushTimer.current = null;
+      }
+      const batch = pending.current;
+      if (batch.size === 0) return;
+      pending.current = new Map();
       setRuns((prev) => {
-        const run = prev[ev.runId];
-        if (!run) return prev;
-        // Cap retained log size — follow-mode streams run indefinitely.
-        return { ...prev, [ev.runId]: { ...run, log: (run.log + ev.chunk).slice(-200_000) } };
+        let changed = false;
+        const next = { ...prev };
+        for (const [runId, chunks] of batch) {
+          const run = next[runId];
+          if (!run) continue;
+          changed = true;
+          // Cap retained log size — follow-mode streams run indefinitely.
+          next[runId] = { ...run, log: (run.log + chunks.join('')).slice(-200_000) };
+        }
+        return changed ? next : prev;
       });
+    };
+
+    const offOutput = window.mvpfy.onRunOutput((ev) => {
+      const waiting = pending.current.get(ev.runId) ?? [];
+      waiting.push(ev.chunk);
+      pending.current.set(ev.runId, waiting);
+      if (flushTimer.current === null) {
+        flushTimer.current = window.setTimeout(flush, LOG_FLUSH_MS);
+      }
     });
     const offExit = window.mvpfy.onRunExit((ev) => {
+      // Before anything reads the log. The last chunks of a run carry the
+      // things that are read off it when it ends — the pull request URL, a
+      // codex thread id, the message that says a conversation was lost —
+      // and leaving them in the buffer would silently lose all three.
+      flush();
       finishedCodes.current.set(ev.runId, ev.code);
       const waiters = waiting.current.get(ev.runId);
       if (waiters) {
@@ -84,6 +130,10 @@ export function useRuns(onRunFinished?: (run: RunState) => void): RunsApi {
     return () => {
       offOutput();
       offExit();
+      if (flushTimer.current !== null) {
+        window.clearTimeout(flushTimer.current);
+        flushTimer.current = null;
+      }
     };
   }, []);
 

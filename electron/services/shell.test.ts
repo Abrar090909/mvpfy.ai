@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
-  cdTo,
   IS_WIN,
-  openTerminalCommand,
+  cdTo,
   killProcessTree,
+  openTerminalCommand,
+  parseEnvDump,
   parseRegistryPath,
+  resolveLoginEnv,
   shellQuote,
   spawnShell,
+  spawnShellSync,
   winShellArgs,
 } from './shell';
 
@@ -176,5 +179,61 @@ describe('openTerminalCommand', () => {
   it.runIf(process.platform === 'linux')('tries several terminals, falling through', () => {
     // No single terminal exists on Linux, so the first that does wins.
     expect(openTerminalCommand('/home/pm/shop')).toContain('||');
+  });
+});
+
+describe('resolving the profile once instead of per command', () => {
+  // Every command used to run through `zsh -lc`, which sources the user's
+  // profile — nvm and all — before the command starts. Measured on a
+  // developer's machine: `git rev-parse` is 11ms on its own and 101ms that
+  // way, and a refresh fires twenty to thirty of them. The profile is read
+  // once now and reused.
+  it('reads NUL-separated entries, splitting on the first =', () => {
+    expect(parseEnvDump('PATH=/usr/bin\0HOME=/Users/pm\0')).toEqual({
+      PATH: '/usr/bin',
+      HOME: '/Users/pm',
+    });
+  });
+
+  it('keeps a value that itself contains an =', () => {
+    // A DSN or a connection string routinely does.
+    expect(parseEnvDump('DSN=postgres://u:p@h/db?a=1&b=2\0').DSN).toBe(
+      'postgres://u:p@h/db?a=1&b=2'
+    );
+  });
+
+  it('keeps a value containing a newline, which a line parser would cut', () => {
+    // The reason for -0: a line parser silently truncates these.
+    expect(parseEnvDump('KEY=line one\nline two\0OTHER=x\0')).toEqual({
+      KEY: 'line one\nline two',
+      OTHER: 'x',
+    });
+  });
+
+  it('ignores anything that is not an assignment', () => {
+    expect(parseEnvDump('')).toEqual({});
+    expect(parseEnvDump('\0\0')).toEqual({});
+    expect(parseEnvDump('=orphan\0OK=1\0')).toEqual({ OK: '1' });
+  });
+
+  it('finds the tools a GUI app would otherwise miss', () => {
+    // The whole reason the login shell was there. If this fails, the fix
+    // has broken every command rather than merely slowed it.
+    const env = resolveLoginEnv();
+    expect(env.PATH, 'a PATH is the point').toBeTruthy();
+    const found = spawnShellSync('command -v git', { encoding: 'utf8', timeout: 10_000 });
+    expect(found.status, 'git must still be findable').toBe(0);
+    expect(String(found.stdout).trim()).toMatch(/git/);
+  });
+
+  it('lets a caller override what the profile said', () => {
+    // Callers ask for specific things — a Docker context, a git prompt
+    // turned off — and those must win over the inherited value.
+    const res = spawnShellSync('echo "$MVPFY_TEST_MARKER"', {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: { ...process.env, MVPFY_TEST_MARKER: 'from-the-caller' },
+    });
+    expect(String(res.stdout).trim()).toBe('from-the-caller');
   });
 });
