@@ -58,7 +58,8 @@ function themeColours(): Set<string> {
       stack.push({ key: opens[1], indent });
       continue;
     }
-    const leaf = /^\s*'?([A-Za-z][\w-]*)'?\s*:\s*'/.exec(line);
+    // A value is a literal ('#0b0b0d') or a theme variable (v('paper')).
+    const leaf = /^\s*'?([A-Za-z][\w-]*)'?\s*:\s*(?:'|v\()/.exec(line);
     if (leaf && stack.some((s) => s.key === 'colors')) {
       const parent = stack[stack.length - 1];
       if (parent && parent.key !== 'colors') {

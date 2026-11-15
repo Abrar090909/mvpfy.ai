@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CliStatus,
   MvpfyState,
@@ -19,7 +19,9 @@ import {
 import ConnectFeature1Banner from './views/ConnectFeature1Banner';
 import ProjectShell, { ProjectTab } from './views/ProjectShell';
 import SettingsView from './views/SettingsView';
-import TopBar from './views/TopBar';
+import Sidebar from './views/Sidebar';
+import StatusBar from './views/StatusBar';
+import { toggledTheme, useTheme } from './lib/theme';
 
 type Screen = 'project' | 'settings' | 'add';
 
@@ -48,13 +50,18 @@ export default function App() {
   }, []);
 
   const updateState = useCallback((mutate: (prev: MvpfyState) => MvpfyState) => {
-    setState((prev) => {
-      if (!prev) return prev;
-      const next = mutate(prev);
-      void saveState(next);
-      return next;
-    });
+    setState((prev) => (prev ? mutate(prev) : prev));
   }, []);
+
+  // Saved once per committed change, from here rather than inside the updater:
+  // an updater may run twice (StrictMode does exactly that), and one that
+  // returned the state unchanged still wrote the whole file — synchronously,
+  // on the main process, in the way of every log line behind it.
+  const loadedState = useRef<MvpfyState | null>(null);
+  useEffect(() => {
+    if (!state || state === loadedState.current) return;
+    void saveState(state);
+  }, [state]);
 
   const onRunFinished = useCallback(
     (run: RunState) => {
@@ -94,6 +101,7 @@ export default function App() {
   );
 
   const runsApi = useRuns(onRunFinished);
+  useTheme(state?.settings.theme);
 
   const refreshClis = useCallback(() => {
     void checkClis().then(setCliStatuses);
@@ -101,6 +109,7 @@ export default function App() {
 
   useEffect(() => {
     void loadState().then((s) => {
+      loadedState.current = s; // what is on disk already; no need to write it back
       setState(s);
       setActiveProjectId(s.projects[0]?.id ?? null);
       if (s.projects.length === 0) setScreen('add');
@@ -109,7 +118,9 @@ export default function App() {
   }, [refreshClis]);
 
   if (!state) {
-    return <div className="flex h-full items-center justify-center text-muted">Loading…</div>;
+    return (
+      <div className="flex h-full items-center justify-center bg-paper text-muted">Loading…</div>
+    );
   }
 
   const activeProject =
@@ -119,11 +130,12 @@ export default function App() {
     : 'overview';
 
   return (
-    <div className="flex h-full flex-col bg-paper">
-      <TopBar
-        version={appVersion}
+    <div className="flex h-full bg-paper text-ink">
+      <Sidebar
         projects={state.projects}
         activeProjectId={activeProject?.id ?? null}
+        screen={screen}
+        runs={runsApi.runs}
         tenantConnected={Boolean(state.tenant?.tokenKeychainEntry)}
         tenantSlug={state.tenant?.slug ?? null}
         onSelectProject={(id) => {
@@ -135,91 +147,98 @@ export default function App() {
           setSettingsFocus(null);
           setScreen('settings');
         }}
+        theme={state.settings.theme}
+        onToggleTheme={() =>
+          updateState((prev) => ({
+            ...prev,
+            settings: { ...prev.settings, theme: toggledTheme(prev.settings.theme) },
+          }))
+        }
       />
 
-      {screen === 'project' && activeProject && shouldShowConnectNudge(state, nudgeDismissedAt) && (
-        <ConnectFeature1Banner
-          onConnect={() => {
-            setSettingsFocus('feature1');
-            setScreen('settings');
-          }}
-          onDismiss={() => {
-            const now = new Date();
-            saveConnectNudgeDismissedAt(now);
-            setNudgeDismissedAt(now.toISOString());
-          }}
-        />
-      )}
-
-      {screen === 'settings' ? (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <SettingsView
-            version={appVersion}
-            state={state}
-            cliStatuses={cliStatuses}
-            onRefreshClis={refreshClis}
-            updateState={updateState}
-            focus={settingsFocus}
-          />
-        </div>
-      ) : screen === 'add' || !activeProject ? (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <AddProjectView
-            state={state}
-            updateState={updateState}
-            onCreated={(id) => {
-              setActiveProjectId(id);
-              setScreen('project');
-            }}
-          />
-        </div>
-      ) : (
-        <ProjectShell
-          key={activeProject.id}
-          project={activeProject}
-          state={state}
-          updateState={updateState}
-          runsApi={runsApi}
-          tab={tab}
-          onTabChange={(t) => setTabByProject((prev) => ({ ...prev, [activeProject.id]: t }))}
-        />
-      )}
-
-      {updateStatus && (
-        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-3 rounded-lg border border-line bg-surface px-4 py-3 shadow-[0_8px_24px_rgba(27,26,23,.10)]">
-          <span className="text-[13px] text-body">
-            {updateStatus.kind === 'downloaded'
-              ? `Update ${updateStatus.version ?? ''} installs when you quit.`
-              : `Update ${updateStatus.version ?? ''} is available.`}
-          </span>
-          {updateStatus.kind === 'downloaded' ? (
-            <button
-              onClick={() => void window.mvpfy.installUpdate()}
-              className="btn-primary h-[30px] px-3 text-xs"
-            >
-              Restart to update
-            </button>
-          ) : (
-            <button
-              onClick={() =>
-                void window.mvpfy.openExternal(
-                  updateStatus.version ? macInstallerUrl(updateStatus.version) : RELEASES_URL
-                )
-              }
-              className="btn-primary h-[30px] px-3 text-xs"
-            >
-              Download ↗
-            </button>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {screen === 'project' &&
+          activeProject &&
+          shouldShowConnectNudge(state, nudgeDismissedAt) && (
+            <ConnectFeature1Banner
+              onConnect={() => {
+                setSettingsFocus('feature1');
+                setScreen('settings');
+              }}
+              onDismiss={() => {
+                const now = new Date();
+                saveConnectNudgeDismissedAt(now);
+                setNudgeDismissedAt(now.toISOString());
+              }}
+            />
           )}
-          <button
-            onClick={() => setUpdateStatus(null)}
-            className="text-muted hover:text-ink"
-            title="Dismiss"
-          >
-            ×
-          </button>
+
+        {/*
+          The project stays mounted under Settings and Add, covered rather than
+          unmounted. Unmounting it threw away everything its hooks remember for
+          the session — the implement-all chain, the queue, a quota wait — so a
+          look at Settings mid-run quietly stopped the work. Covered the same way
+          ProjectShell stacks its own panes, so the embedded webviews are never
+          hidden with display:none. The cover sits above the project's own tab
+          strip: below it, the strip showed through, still marking a tab as open
+          on top of Settings.
+        */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          {activeProject && (
+            <div
+              className="flex min-h-0 flex-1 flex-col"
+              aria-hidden={screen !== 'project'}
+              {...(screen !== 'project' ? { inert: '' } : {})}
+            >
+              <ProjectShell
+                key={activeProject.id}
+                project={activeProject}
+                state={state}
+                updateState={updateState}
+                runsApi={runsApi}
+                tab={tab}
+                onTabChange={(t) => setTabByProject((prev) => ({ ...prev, [activeProject.id]: t }))}
+              />
+            </div>
+          )}
+          {screen === 'settings' ? (
+            <div className="absolute inset-0 z-30 overflow-y-auto bg-paper">
+              <SettingsView
+                version={appVersion}
+                state={state}
+                cliStatuses={cliStatuses}
+                onRefreshClis={refreshClis}
+                updateState={updateState}
+                focus={settingsFocus}
+              />
+            </div>
+          ) : screen === 'add' || !activeProject ? (
+            <div className="absolute inset-0 z-30 overflow-y-auto bg-paper">
+              <AddProjectView
+                state={state}
+                updateState={updateState}
+                onCreated={(id) => {
+                  setActiveProjectId(id);
+                  setScreen('project');
+                }}
+              />
+            </div>
+          ) : null}
         </div>
-      )}
+
+        <StatusBar
+          project={activeProject}
+          runs={runsApi.runs}
+          version={appVersion}
+          update={updateStatus}
+          onInstallUpdate={() => void window.mvpfy.installUpdate()}
+          onDownloadUpdate={() =>
+            void window.mvpfy.openExternal(
+              updateStatus?.version ? macInstallerUrl(updateStatus.version) : RELEASES_URL
+            )
+          }
+        />
+      </div>
     </div>
   );
 }

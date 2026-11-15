@@ -9,18 +9,15 @@
   "cssEntry": "dist/ds-styles.css",
   "componentSrcMap": {
     "LogPanel": "src/components/LogPanel.tsx",
-    "ProjectList": "src/components/ProjectList.tsx",
-    "Settings": "src/components/Settings.tsx",
-    "ProjectHeader": "src/components/project/ProjectHeader.tsx",
-    "EnvironmentCard": "src/components/project/EnvironmentCard.tsx",
-    "DemoCredentialsCard": "src/components/project/DemoCredentialsCard.tsx",
-    "MobilePreviewCard": "src/components/project/MobilePreviewCard.tsx",
-    "QuestionsCard": "src/components/project/QuestionsCard.tsx",
-    "GeneratedFilesCard": "src/components/project/GeneratedFilesCard.tsx",
-    "StoriesCard": "src/components/project/StoriesCard.tsx",
+    "Logo": "src/components/Logo.tsx",
+    "Sidebar": "src/views/Sidebar.tsx",
+    "StatusBar": "src/views/StatusBar.tsx",
+    "ConnectFeature1Banner": "src/views/ConnectFeature1Banner.tsx",
     "App": null,
-    "ProjectDetail": null,
-    "PreviewPane": null
+    "ProjectShell": null,
+    "OverviewView": null,
+    "PlanView": null,
+    "AppView": null
   },
   "readmeHeader": ".design-sync/conventions.md",
   "entry": "./.design-sync/entry.ts"

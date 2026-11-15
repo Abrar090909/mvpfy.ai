@@ -1,3 +1,4 @@
+import { ArrowDownUp, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { FeaturePlan, ProjectController } from '../hooks/useProjectController';
@@ -137,16 +138,18 @@ export default function PlanView({ c, onOpenTab }: Props) {
         }}
         disabled={sync.syncing}
         title="Fetch the Feature1 features assigned to you"
-        className="ml-auto h-7 rounded-full border border-line bg-surface px-3 text-xs text-body transition-colors hover:border-muted disabled:opacity-60"
+        className="btn-secondary ml-auto h-7 px-2.5 text-[12px] disabled:opacity-60"
       >
-        {sync.syncing ? 'Syncing…' : '⇅ Sync Feature1'}
+        <ArrowDownUp size={13} aria-hidden />
+        {sync.syncing ? 'Syncing…' : 'Sync Feature1'}
       </button>
       <button
         onClick={c.refresh}
         title="Re-read plans, stories, launch readiness and pull request status"
-        className="h-7 rounded-full border border-line bg-surface px-3 text-xs text-muted transition-colors hover:border-muted hover:text-body"
+        className="btn-ghost h-7 px-2.5 text-[12px]"
       >
-        ↻ Refresh
+        <RefreshCw size={13} aria-hidden />
+        Refresh
       </button>
       {(sync.error || assignedNotPulled.length > 0 || sync.syncedAt) && (
         <div className="w-full">
@@ -198,9 +201,8 @@ export default function PlanView({ c, onOpenTab }: Props) {
         <div className={`mx-auto w-full max-w-[640px] ${plans.length === 0 ? 'pt-14' : 'pt-4'}`}>
           <h1 className="mb-2 text-[26px] font-semibold tracking-[-0.02em]">Plan a feature</h1>
           <p className="mb-7 text-sm leading-relaxed text-body [text-wrap:pretty]">
-            Describe what you want to build. mvpfy studies the product, writes a minimal spec —
-            problem, scope, flows, requirements — and breaks it into user stories you can run one by
-            one on the board.
+            Describe what you want to build. mvpfy studies your product, writes a short spec and
+            splits it into stories you can run on the board.
             {plans.length > 0 &&
               ' Each feature gets its own board — planning this one never touches the others.'}
           </p>
@@ -258,7 +260,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
             <>
               <label className="section-label mb-1.5 block">Feature1 feature</label>
               <p className="mb-2 text-[13px] leading-relaxed text-body">
-                <button onClick={() => void sync.sync()} className="text-go hover:underline">
+                <button onClick={() => void sync.sync()} className="link">
                   Sync Feature1
                 </button>{' '}
                 to list what is assigned to you, or paste a feature code or id here. Either way
@@ -384,7 +386,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
             return (
               <div
                 key={lane}
-                className="min-h-[220px] rounded-[10px] border border-line bg-sunken p-2.5"
+                className="min-h-[160px] rounded-xl border border-line bg-surface/60 p-2.5"
               >
                 <div className="mb-2 flex items-baseline justify-between px-1">
                   <span className="section-label">{LANE_LABELS[lane]}</span>
@@ -415,7 +417,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
                     />
                   ))}
                   {inLane.length === 0 && (
-                    <p className="px-1 py-4 text-center text-[11.5px] text-faint">—</p>
+                    <p className="px-1 py-4 text-center text-[11.5px] text-faint">Nothing here</p>
                   )}
                 </div>
               </div>
@@ -423,8 +425,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
           })}
         </div>
         <p className="mt-3 text-[11.5px] text-muted">
-          A feature moves across as its stories do: Coding once any story has started, Testing once
-          you have accepted them all, Done when{' '}
+          Coding once a story starts · Testing once you accept them all · Done when{' '}
           {c.trunkBased ? 'you accept the feature' : 'its pull request is open'}.
         </p>
       </div>
@@ -440,7 +441,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
           <h2 className="text-[15px] font-semibold">Writing the product spec…</h2>
           <p className="mt-1 max-w-[420px] text-[13px] text-body">
             Studying the product and drafting the spec and stories — a couple of minutes.{' '}
-            <button onClick={() => onOpenTab('logs')} className="text-go hover:underline">
+            <button onClick={() => onOpenTab('logs')} className="link">
               Watch progress
             </button>
           </p>
@@ -493,7 +494,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
             </p>
           </div>
           {c.actionError && (
-            <div className="mb-5 rounded-lg border border-danger/30 bg-red-50 px-4 py-2.5 text-[13px] text-danger">
+            <div className="mb-5 rounded-lg border border-danger/30 bg-danger-bg px-4 py-2.5 text-[13px] text-danger">
               {c.actionError}
             </div>
           )}
@@ -556,7 +557,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
       </div>
 
       {c.actionError && (
-        <div className="mb-5 rounded-lg border border-danger/30 bg-red-50 px-4 py-2.5 text-[13px] text-danger">
+        <div className="mb-5 rounded-lg border border-danger/30 bg-danger-bg px-4 py-2.5 text-[13px] text-danger">
           {c.actionError}
         </div>
       )}
@@ -621,7 +622,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
           // work accepted that no run ever did.
           <div
             key={lane}
-            className="min-h-[220px] rounded-[10px] border border-line bg-sunken p-2.5"
+            className="min-h-[160px] rounded-xl border border-line bg-surface/60 p-2.5"
           >
             <div className="mb-2 flex items-baseline justify-between px-1">
               <span className="section-label">{LANE_LABELS[lane]}</span>
@@ -642,7 +643,7 @@ export default function PlanView({ c, onOpenTab }: Props) {
               ))}
               {byLane(lane).length === 0 && (
                 <p className="px-1 py-4 text-center text-[11.5px] text-faint">
-                  {lane === 'testing' ? 'Stories land here after coding' : '—'}
+                  {lane === 'testing' ? 'Stories land here after coding' : 'Nothing here'}
                 </p>
               )}
             </div>
@@ -650,12 +651,11 @@ export default function PlanView({ c, onOpenTab }: Props) {
         ))}
       </div>
       <p className="mt-3 text-[11.5px] text-muted">
-        mvpfy moves stories through Coding into Testing as it implements the feature. Only you can
-        move a story to Done — test it in the App tab first, and send it back with feedback if it is
-        not right.{' '}
+        mvpfy moves each story to Testing once it is built. Only you move a story to Done — try it
+        in the App tab, or send it back with feedback.{' '}
         {c.trunkBased
-          ? 'This project is trunk-based: every story is pushed straight to the trunk as soon as its tests pass, with no branch and no pull request.'
-          : 'Every story in this feature commits to one branch, and one pull request opens for the whole feature once you have accepted them all.'}
+          ? 'Trunk-based: each story is pushed straight to the trunk once its tests pass.'
+          : 'One pull request opens for the whole feature once you accept every story.'}
       </p>
 
       {/* Asking for a change in words, when the change is not a story. The
@@ -981,7 +981,7 @@ function PrBadges({ pr }: { pr: PullRequestState }) {
           : tone === 'warn'
             ? 'bg-warn-bg text-warn-text'
             : tone === 'danger'
-              ? 'bg-red-50 text-danger'
+              ? 'bg-danger-bg text-danger'
               : 'bg-sunken text-muted'
       }`}
     >
@@ -1050,7 +1050,7 @@ function ConfirmDeleteFeature({
           <button
             onClick={onConfirm}
             disabled={c.busy}
-            className="h-8 rounded-md bg-danger px-3.5 text-[13px] font-medium text-white disabled:opacity-50"
+            className="h-8 rounded-md bg-danger px-3.5 text-[13px] font-medium text-onink disabled:opacity-50"
           >
             Delete it
           </button>
@@ -1113,10 +1113,7 @@ function FeatureDesign({
             : 'What the agent is told to match.'}
         </span>
         <div className="ml-auto flex items-center gap-3">
-          <button
-            onClick={() => setEditingLinks((v) => !v)}
-            className="text-[11.5px] text-go hover:underline"
-          >
+          <button onClick={() => setEditingLinks((v) => !v)} className="text-[11.5px] link">
             {design.links.length > 0 ? 'Edit links' : 'Add a link'}
           </button>
           <button
@@ -1147,7 +1144,7 @@ function FeatureDesign({
               <button
                 onClick={() => void c.removeDesign(name)}
                 title={`Remove ${name}`}
-                className="absolute right-1 top-1 hidden rounded bg-ink/80 px-1.5 text-[11px] text-white group-hover:block"
+                className="absolute right-1 top-1 hidden rounded border border-line bg-raised px-1.5 text-[11px] text-ink group-hover:block"
               >
                 ×
               </button>
@@ -1189,7 +1186,7 @@ function FeatureDesign({
             <button
               key={l}
               onClick={() => c.openExternal(l)}
-              className="max-w-full truncate font-mono text-[11.5px] text-go hover:underline"
+              className="max-w-full truncate font-mono text-[11.5px] link"
             >
               {l.replace(/^https?:\/\//, '')}
             </button>
@@ -1230,9 +1227,8 @@ function ContinueFeature({ c }: { c: ProjectController }) {
           {s.quota
             ? 'Nothing is wrong with the code or the setup — the run used up what your subscription allows. '
             : ''}
-          Everything it had done is still in this feature&apos;s checkout. Continuing reads what is
-          already there and carries on from it — it does not start again, and it does not undo
-          anything — then works through the rest of the feature.
+          Its work so far is safe in this feature&apos;s checkout. Continuing picks up from there —
+          nothing is redone or undone.
           {/* The wait is deliberate and unattended, so it has to be visible:
               a timer nobody can see is indistinguishable from nothing
               happening, which is what the button below is for. */}
@@ -1361,7 +1357,7 @@ function FeatureCheckouts({ c }: { c: ProjectController }) {
           {rows.length === 1 ? 'its own folder' : `${rows.length} folders`}, away from the app you
           are running.
         </span>
-        <span className="shrink-0 text-[11.5px] text-go">{open ? 'Hide' : 'Where?'}</span>
+        <span className="shrink-0 text-[11.5px] text-muted">{open ? 'Hide' : 'Where?'}</span>
       </button>
       {open && (
         <div className="flex flex-col gap-2.5 border-t border-line-subtle px-5 py-3.5">
@@ -1374,15 +1370,12 @@ function FeatureCheckouts({ c }: { c: ProjectController }) {
                 <code className="min-w-0 flex-1 truncate rounded-[5px] border border-line bg-surface px-2 py-1 font-mono text-[11px] text-muted">
                   {r.worktree.replace(/^\/Users\/[^/]+/, '~')}
                 </code>
-                <button
-                  onClick={() => copy(r.worktree)}
-                  className="shrink-0 text-[11.5px] text-go hover:underline"
-                >
+                <button onClick={() => copy(r.worktree)} className="shrink-0 text-[11.5px] link">
                   {copied === r.worktree ? 'Copied' : 'Copy'}
                 </button>
                 <button
-                  onClick={() => void window.mvpfy.openTerminal(r.worktree)}
-                  className="shrink-0 text-[11.5px] text-go hover:underline"
+                  onClick={() => c.openTerminal(r.worktree)}
+                  className="shrink-0 text-[11.5px] link"
                 >
                   Terminal
                 </button>
@@ -1441,9 +1434,8 @@ function TrunkUpdate({ c }: { c: ProjectController }) {
               {c.justUpdated
                 ? `Everything on ${trunk} is in this feature, and the branch on GitHub has it too if it was already there.`
                 : `This feature has everything on ${trunk} as of the last fetch.`}{' '}
-              Updating again asks the remote, merges anything new into this feature&apos;s own
-              checkout and pushes the result if its branch is already on GitHub — nothing else in
-              the workspace moves, and {trunk} is never written to.
+              Updating again merges anything new into this feature&apos;s own checkout; {trunk}
+              itself is never changed.
             </>
           )}
         </p>
@@ -1540,7 +1532,7 @@ function RaisedPullRequests({ c, plan }: { c: ProjectController; plan: ProjectPl
           <button
             onClick={() => c.refreshPrStates()}
             disabled={c.prStatesLoading}
-            className="shrink-0 text-[11.5px] text-go hover:underline disabled:text-muted disabled:no-underline"
+            className="shrink-0 text-[11.5px] link disabled:text-muted disabled:no-underline"
           >
             {c.prStatesLoading ? 'Checking…' : 'Refresh'}
           </button>
@@ -1552,7 +1544,7 @@ function RaisedPullRequests({ c, plan }: { c: ProjectController; plan: ProjectPl
               <div key={url} className="flex w-full flex-wrap items-center gap-x-2 gap-y-1">
                 <button
                   onClick={() => c.openExternal(url)}
-                  className="max-w-full truncate font-mono text-[11.5px] text-go hover:underline"
+                  className="max-w-full truncate font-mono text-[11.5px] link"
                 >
                   {url.replace('https://', '')}
                 </button>
@@ -1643,7 +1635,7 @@ function FeatureShipControls({ c, plan }: { c: ProjectController; plan: ProjectP
       <button
         onClick={() => void c.raisePr()}
         disabled={c.busy}
-        className="h-8 rounded-md bg-danger px-3.5 text-[13px] font-medium text-white disabled:opacity-50"
+        className="h-8 rounded-md bg-danger px-3.5 text-[13px] font-medium text-onink disabled:opacity-50"
       >
         Raising failed — try again
       </button>
@@ -1722,19 +1714,13 @@ function ReadinessChip({
       title={c.readinessRunning ? 'Checking what is left before launch…' : (v?.title ?? '')}
       className={`flex h-7 max-w-[280px] items-center gap-1.5 rounded-full border px-3 text-xs transition-colors ${
         selected
-          ? 'border-ink bg-ink text-white'
+          ? 'border-line-strong bg-raised text-ink'
           : 'border-line bg-surface text-body hover:border-muted'
       }`}
     >
-      <span
-        className={`h-1.5 w-1.5 shrink-0 rounded-full ${selected && !c.readinessRunning ? 'bg-white' : dot}`}
-      />
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
       <span className="truncate">Launch</span>
-      {count && (
-        <span className={`shrink-0 text-[10px] ${selected ? 'text-white/70' : 'text-faint'}`}>
-          {count}
-        </span>
-      )}
+      {count && <span className={`shrink-0 text-[10px] ${'text-muted'}`}>{count}</span>}
     </button>
   );
 }
@@ -1775,7 +1761,7 @@ function FeatureCard({
             checked={picked}
             onChange={() => onPick?.()}
             aria-label={`Pick ${plan?.spec.feature || feature.slug} to implement`}
-            className="h-3.5 w-3.5 shrink-0 accent-[color:var(--go,#1f7a4d)]"
+            className="h-3.5 w-3.5 shrink-0 accent-go"
           />
         )}
         {busy && <span className="dot-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-go" />}
@@ -1856,7 +1842,7 @@ function AssignedFeaturePill({
       {feature.storyCount !== undefined && feature.storyCount > 0 && (
         <span className="shrink-0 font-mono text-[10px] text-faint">{feature.storyCount}</span>
       )}
-      <span className="shrink-0 text-[10px] text-go">+ pull</span>
+      <span className="shrink-0 text-[10.5px] text-body">+ pull</span>
     </button>
   );
 }
@@ -1881,30 +1867,18 @@ function FeatureChip({
       title={feature.generating ? 'Writing the spec…' : code ? `${code} — ${label}` : label}
       className={`flex h-7 max-w-[280px] items-center gap-1.5 rounded-full border px-3 text-xs transition-colors ${
         selected
-          ? 'border-ink bg-ink text-white'
+          ? 'border-line-strong bg-raised text-ink'
           : 'border-line bg-surface text-body hover:border-muted'
       }`}
     >
-      {activeRun && (
-        <span
-          className={`dot-pulse h-1.5 w-1.5 shrink-0 rounded-full ${selected ? 'bg-white' : 'bg-go'}`}
-        />
-      )}
+      {activeRun && <span className={`dot-pulse h-1.5 w-1.5 shrink-0 rounded-full ${'bg-go'}`} />}
       {/* Ahead of the name and never truncated: the code is the short thing,
           and a row of pills all reading the same first few words is exactly
           where it earns its place. */}
-      {code && (
-        <span
-          className={`shrink-0 font-mono text-[10px] ${selected ? 'text-white/70' : 'text-faint'}`}
-        >
-          {code}
-        </span>
-      )}
+      {code && <span className={`shrink-0 font-mono text-[10px] ${'text-muted'}`}>{code}</span>}
       <span className="truncate">{label}</span>
       {total > 0 && (
-        <span
-          className={`shrink-0 font-mono text-[10px] ${selected ? 'text-white/70' : 'text-faint'}`}
-        >
+        <span className={`shrink-0 font-mono text-[10px] ${'text-muted'}`}>
           {doneCount}/{total}
         </span>
       )}
@@ -1976,7 +1950,7 @@ function StoryCard({
       {story.prUrl && (
         <button
           onClick={() => c.openExternal(story.prUrl!)}
-          className="mt-1.5 block max-w-full truncate text-left font-mono text-[10.5px] text-go hover:underline"
+          className="mt-1.5 block max-w-full truncate text-left font-mono text-[10.5px] link"
         >
           {story.prUrl.replace('https://', '')}
         </button>
@@ -2007,7 +1981,7 @@ function StoryCard({
             </button>
             <button
               onClick={() => void c.moveStory(story.code, 'done')}
-              className="h-6 flex-1 rounded-md bg-go text-[11px] font-medium text-white hover:bg-go-hover"
+              className="h-6 flex-1 rounded-md bg-go text-[11px] font-medium text-onink hover:bg-go-hover"
             >
               ✓ Done
             </button>

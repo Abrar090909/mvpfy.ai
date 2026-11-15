@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ANSWERS_FILE,
   BOOTSTRAP_FILE,
@@ -62,6 +62,10 @@ const HIDDEN_FROM_VIEWER: string[] = [
 ];
 
 /** Strip the linked-mode config-dir prefix to compare bare file names. */
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
+}
+
 function baseName(name: string): string {
   return name.startsWith('.mvpfy/') ? name.slice('.mvpfy/'.length) : name;
 }
@@ -329,6 +333,18 @@ export interface ProjectController
   setTargetRepoDir(dir: string): void;
   setConfirmRemove(value: boolean): void;
   openExternal(url: string): void;
+  /** Each repository's current branch and remote, asked of git. */
+  repoBranches: Record<string, string>;
+  repoRemotes: Record<string, string>;
+  /** The OS folder picker; empty when cancelled. */
+  pickDirectories(): Promise<string[]>;
+  /** The user's own terminal, opened in a directory. */
+  openTerminal(dir: string): void;
+  /**
+   * The environment a running service's container was given; null when it
+   * could not be read. Stable across renders, so an effect can depend on it.
+   */
+  serviceEnv(service: string): Promise<Record<string, string> | null>;
 }
 
 /**
@@ -356,6 +372,35 @@ export function useProjectController(
   const latestRun = projectRuns.filter((r) => !isAmbientRun(r.handle.kind)).pop() ?? null;
   const appLogsRun = projectRuns.filter((r) => r.handle.kind === 'app-logs').pop() ?? null;
   const busy = latestRun?.running ?? false;
+
+  // Each repository's branch and remote, asked of git rather than taken from
+  // the project record (which describes the remote it was created with, not
+  // one added since). Re-asked when a run ends, and the answer to a superseded
+  // question is dropped rather than painted over a newer one.
+  const serviceEnv = useCallback(
+    (service: string) =>
+      window.mvpfy.serviceEnv(project.localPath, project.mode === 'linked', service),
+    [project.localPath, project.mode]
+  );
+
+  const [repoInfo, setRepoInfo] = useState<{
+    branches: Record<string, string>;
+    remotes: Record<string, string>;
+  }>({ branches: {}, remotes: {} });
+  const repoDirsKey = project.repos.map((r) => r.dir).join('\u0000');
+  useEffect(() => {
+    if (busy) return;
+    const dirs = repoDirsKey ? repoDirsKey.split('\u0000') : [];
+    let cancelled = false;
+    void Promise.all([window.mvpfy.repoBranches(dirs), window.mvpfy.repoRemotes(dirs)])
+      .then(([branches, remotes]) => {
+        if (!cancelled) setRepoInfo({ branches, remotes });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [repoDirsKey, busy]);
   const lastShipRun = Object.values(runsApi.runs)
     .filter((r) => r.handle.projectId === project.id && r.handle.kind === 'ship')
     .pop();
@@ -400,12 +445,19 @@ export function useProjectController(
               f.exists && (GENERATED_FILES as readonly string[]).includes(baseName(f.relativePath))
           )
           .map((f) => f.relativePath);
-        updateState((prev) => ({
-          ...prev,
-          projects: prev.projects.map((p) =>
-            p.id === project.id ? { ...p, generatedFiles: generated } : p
-          ),
-        }));
+        // Unchanged is the usual answer — this runs on every run start and
+        // finish — and returning the same state keeps React from re-rendering
+        // the app and App from saving a file that says what it already said.
+        updateState((prev) => {
+          const current = prev.projects.find((p) => p.id === project.id)?.generatedFiles ?? [];
+          if (sameList(current, generated)) return prev;
+          return {
+            ...prev,
+            projects: prev.projects.map((p) =>
+              p.id === project.id ? { ...p, generatedFiles: generated } : p
+            ),
+          };
+        });
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id, project.localPath, planSlugsKey]);
@@ -519,9 +571,12 @@ export function useProjectController(
   // Each part of the product may read its own env file, so their paths are
   // only known after the inventory has been read — a second read, like the
   // bootstrap tasks' declared files, rather than a guess in the fixed list.
+  const bootstrapContent = contentOf(files, pf(BOOTSTRAP_FILE));
+  // Parsed when the inventory changes, not on every render (every log flush).
+  const components = useMemo(() => parseComponents(bootstrapContent), [bootstrapContent]);
   const envPaths = [
     ...new Set(
-      parseComponents(contentOf(files, pf(BOOTSTRAP_FILE)))
+      components
         .map((component) => component.envFile)
         .filter((path): path is string => Boolean(path))
     ),
@@ -549,7 +604,7 @@ export function useProjectController(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envPathKey, project.localPath, runningCount]);
 
-  const componentEnvFiles = parseComponents(contentOf(files, pf(BOOTSTRAP_FILE)))
+  const componentEnvFiles = components
     .filter((component) => component.envFile)
     .map((component) => ({
       component: component.name,
@@ -605,9 +660,27 @@ export function useProjectController(
   const bootstrapFlow = useBootstrapFlow(ctx, appHealthy);
   const readinessActions = useReadinessActions(ctx);
   const launchActions = useLaunchActions(ctx, readinessActions.readinessVerdict);
+  // Each parses YAML. Computed when their files change rather than on every
+  // render — the controller re-renders on each log flush while anything runs.
+  const demoCredentials = useMemo(() => parseDemoCredentials(mvpfyYmlContent), [mvpfyYmlContent]);
+  const mobilePreview = useMemo(() => parseMobilePreview(mvpfyYmlContent), [mvpfyYmlContent]);
+  const composeContent = contentOf(files, pf('docker-compose.mvpfy.yml'));
+  const portEnvContent = contentOf(files, pf('.env')) ?? contentOf(files, pf('.env.mvpfy.example'));
+  // Only a real drift, not merely a different first entry: a stack publishes
+  // several ports, and the app being among them is the whole question.
+  const portMismatch = useMemo(() => {
+    const published = parsePublishedPorts(composeContent, portEnvContent);
+    if (published.length === 0 || published.includes(appPort)) return null;
+    return { watching: appPort, publishing: published[0] };
+  }, [composeContent, portEnvContent, appPort]);
+  const targets = useMemo(
+    () =>
+      appTargets(bootstrapFlow.productComponents, mvpfyYmlContent, `http://localhost:${appPort}`),
+    [bootstrapFlow.productComponents, mvpfyYmlContent, appPort]
+  );
   const appChat = useAppChat(
     ctx,
-    appTargets(bootstrapFlow.productComponents, mvpfyYmlContent, `http://localhost:${appPort}`),
+    targets,
     (service) =>
       service ? projectActions.restartService(service) : projectActions.docker('restart'),
     trouble
@@ -662,7 +735,9 @@ export function useProjectController(
     project,
     appUrl: `http://localhost:${appPort}`,
     appHealthy,
-    ideUrl: idePort ? `http://localhost:${idePort}` : null,
+    // 127.0.0.1, not localhost: the editor is published on IPv4 loopback only,
+    // and localhost can resolve to ::1 first.
+    ideUrl: idePort ? `http://127.0.0.1:${idePort}` : null,
     ideHealthy,
     ideStarting: latestRun?.running === true && latestRun.handle.kind === 'ide-up',
     ideError,
@@ -673,8 +748,8 @@ export function useProjectController(
     lastShipPrUrl: lastShipRun?.prUrl ?? null,
     actionError,
     hasMvpfyYml,
-    demoCredentials: parseDemoCredentials(mvpfyYmlContent),
-    mobilePreview: parseMobilePreview(mvpfyYmlContent),
+    demoCredentials,
+    mobilePreview,
     questionsFile: files.find((f) => f.relativePath === pf(QUESTIONS_FILE) && f.exists) ?? null,
     triageContent: contentOf(files, pf(TRIAGE_FILE)),
     summaryContent: contentOf(files, pf(SUMMARY_FILE)),
@@ -695,14 +770,7 @@ export function useProjectController(
     // Only a real drift, not merely a different first entry: a stack publishes
     // several ports, and the app being among them is the whole question. Any
     // other service publishing something else is normal and must not warn.
-    portMismatch: (() => {
-      const published = parsePublishedPorts(
-        contentOf(files, pf('docker-compose.mvpfy.yml')),
-        contentOf(files, pf('.env')) ?? contentOf(files, pf('.env.mvpfy.example'))
-      );
-      if (published.length === 0 || published.includes(appPort)) return null;
-      return { watching: appPort, publishing: published[0] };
-    })(),
+    portMismatch,
     canSeed: /^\s*seed_command:\s*\S/m.test(mvpfyYmlContent ?? ''),
     canDiagnose: lastFailure !== null || appUnresponsive,
     appUnresponsive,
@@ -717,6 +785,11 @@ export function useProjectController(
     stopRun: runsApi.stop,
     setActiveFile,
     openExternal: (url: string) => void window.mvpfy.openExternal(url),
+    repoBranches: repoInfo.branches,
+    repoRemotes: repoInfo.remotes,
+    pickDirectories: () => window.mvpfy.pickDirectory().then((dirs) => dirs ?? []),
+    openTerminal: (dir: string) => void window.mvpfy.openTerminal(dir),
+    serviceEnv,
   };
 }
 
@@ -729,6 +802,13 @@ export function useProjectController(
  * booting. Returns true once it has waited long enough that something is
  * wrong — generous, because a first build can be slow.
  */
+/** How often an app that is coming up is checked. */
+const STARTING_POLL_MS = 2_000;
+/** How often an app that is up is checked, to notice it going down. */
+const HEALTHY_POLL_MS = 10_000;
+/** Misses in a row before an app that was up counts as down. */
+const HEALTHY_MISSES_ALLOWED = 2;
+
 function useHealthPoll(
   port: number | null,
   setHealthy: (v: boolean) => void,
@@ -749,9 +829,21 @@ function useHealthPoll(
       return;
     }
     let cancelled = false;
+    // Misses in a row while healthy. One is a slow answer — a dev server
+    // reloading, a GC pause — and not worth taking the preview down over.
+    let misses = 0;
     const check = async () => {
-      const res = await window.mvpfy.probeUrl(`http://localhost:${port}`);
+      // IPv4 loopback: docker always publishes there (the IDE only there).
+      const res = await window.mvpfy.probeUrl(`http://127.0.0.1:${port}`);
       if (cancelled) return;
+      if (healthy) {
+        // Still watched once it is up: an app that crashes after answering
+        // once used to stay "healthy" for good, so the unresponsive state and
+        // the restart/diagnose recovery behind it could never appear.
+        misses = res.reachable ? 0 : misses + 1;
+        if (misses >= HEALTHY_MISSES_ALLOWED) setHealthy(false);
+        return;
+      }
       if (res.reachable) {
         setHealthy(true);
         return;
@@ -774,10 +866,18 @@ function useHealthPoll(
             }
       );
     };
-    void check();
-    const timer = setInterval(() => {
-      if (!healthy) void check();
-    }, 2000);
+    // One check at a time: composeProgress can take up to 15 s, and a timer
+    // that fires regardless stacked docker calls up behind each other.
+    let inFlight = false;
+    const tick = () => {
+      if (inFlight) return;
+      inFlight = true;
+      void check().finally(() => {
+        inFlight = false;
+      });
+    };
+    tick();
+    const timer = setInterval(tick, healthy ? HEALTHY_POLL_MS : STARTING_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);

@@ -9,7 +9,19 @@ import PlanActivityPanel from '../components/PlanActivityPanel';
 import { parseUsage, shortCount, totalIn } from '../lib/usage';
 import OverviewView from './OverviewView';
 import PlanView from './PlanView';
-import WorkspaceIcon from '../components/WorkspaceIcon';
+import { RUN_LABELS } from '../lib/runLabels';
+import {
+  AppWindow,
+  CodeXml,
+  ExternalLink,
+  LayoutDashboard,
+  LoaderCircle,
+  RotateCw,
+  ScrollText,
+  Square,
+  SquareKanban,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 export type ProjectTab = 'overview' | 'plan' | 'app' | 'code' | 'logs';
 
@@ -38,6 +50,7 @@ export default function ProjectShell({
   // Auto-follow container logs when the PM opens the Logs tab of a running
   // environment; stays running until stopped or the environment goes down.
   const appLogsActive = c.appLogsRun?.running === true;
+  const working = c.runHistory.filter((r) => r.running && r.handle.kind !== 'app-logs').length;
 
   // Follows the newest run until the user picks one, then stays where they
   // put it — a log being read should not be swapped out underneath them.
@@ -54,57 +67,73 @@ export default function ProjectShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, project.status]);
 
-  const tabs: Array<{ id: ProjectTab; label: string; hint?: string }> = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'plan', label: 'Plan' },
-    { id: 'app', label: 'App' },
-    { id: 'code', label: 'Code' },
-    { id: 'logs', label: 'Activity & logs' },
+  const tabs: Array<{ id: ProjectTab; label: string; icon: LucideIcon }> = [
+    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'plan', label: 'Plan', icon: SquareKanban },
+    { id: 'app', label: 'App', icon: AppWindow },
+    { id: 'code', label: 'Code', icon: CodeXml },
+    { id: 'logs', label: 'Logs', icon: ScrollText },
   ];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* An IDE tab strip: the open tab is the same colour as the work below it
+          and joins it; the others sit back in the frame. Two full-width bars
+          (a top bar, then a row of pill tabs) used to spend 128px on this. */}
       <nav
         aria-label="Project workspace"
-        className="z-[15] flex min-h-[64px] shrink-0 flex-wrap items-center gap-1 border-b border-line bg-surface px-4 py-2 sm:px-6"
+        className="relative z-[15] flex h-11 shrink-0 items-stretch border-b border-line bg-chrome"
       >
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            aria-current={tab === t.id ? 'page' : undefined}
-            onClick={() => onTabChange(t.id)}
-            className={`flex h-10 items-center gap-2 rounded-lg px-3 text-[13px] ${
-              tab === t.id
-                ? 'bg-brand/10 font-semibold text-brand'
-                : 'text-muted hover:bg-paper hover:text-ink'
-            }`}
-          >
-            <WorkspaceIcon name={t.id} />
-            {t.label}
-            {t.hint && <span className="font-mono text-[11px] text-faint">{t.hint}</span>}
-          </button>
-        ))}
-        <div className="ml-auto flex flex-wrap items-center gap-3.5 py-1 text-xs">
+        {tabs.map((t) => {
+          const open = tab === t.id;
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.id}
+              aria-current={open ? 'page' : undefined}
+              onClick={() => onTabChange(t.id)}
+              className={`relative flex items-center gap-2 border-r border-line px-4 text-[12.5px] ${
+                open
+                  ? 'bg-paper font-medium text-ink after:absolute after:inset-x-0 after:-bottom-px after:h-px after:bg-paper'
+                  : 'text-muted hover:bg-hoverfill/60 hover:text-ink'
+              }`}
+            >
+              <Icon size={15} strokeWidth={1.6} aria-hidden />
+              {t.label}
+              {t.id === 'logs' && working > 0 && (
+                <LoaderCircle
+                  size={12}
+                  className="spin text-work"
+                  aria-label={`${working} running`}
+                />
+              )}
+            </button>
+          );
+        })}
+        <div className="ml-auto flex items-center gap-1 px-3">
           {tab === 'code' && c.ideUrl && (
             <>
               <button
                 onClick={() => ideWebview.current?.reload?.()}
-                className="text-go hover:text-go-hover hover:underline"
+                className="btn-ghost h-7 px-2 text-[12px]"
               >
+                <RotateCw size={13} aria-hidden />
                 Reload
               </button>
               <button
                 onClick={() => c.ideUrl && c.openExternal(c.ideUrl)}
-                className="text-go hover:text-go-hover hover:underline"
+                className="btn-ghost h-7 px-2 text-[12px]"
               >
-                Open in browser ↗
+                <ExternalLink size={13} aria-hidden />
+                Open in browser
               </button>
               <button
                 onClick={() => void c.stopIde()}
                 disabled={c.busy}
-                className="text-danger hover:text-danger-hover disabled:opacity-50"
+                className="btn-ghost h-7 px-2 text-[12px] text-danger hover:text-danger-hover disabled:opacity-50"
               >
-                Stop IDE
+                <Square size={11} className="fill-current" aria-hidden />
+                Stop editor
               </button>
             </>
           )}
@@ -146,6 +175,7 @@ export default function ProjectShell({
             </div>
           ) : c.ideUrl || c.ideStarting ? (
             <Placeholder
+              icon={LoaderCircle}
               title="Starting the editor…"
               body="First launch downloads the editor image (~300 MB)."
             />
@@ -176,6 +206,7 @@ export default function ProjectShell({
             </div>
           ) : (
             <Placeholder
+              icon={CodeXml}
               title="Open the code in VS Code"
               body="Runs the open-source code-server editor in Docker with this project mounted — read and edit the code right here."
               action={{
@@ -192,9 +223,11 @@ export default function ProjectShell({
           <div className="mx-auto flex w-full max-w-[1120px] flex-col gap-5 px-6 pb-16 pt-6">
             <div>
               <div className="mb-2 flex items-center gap-3">
-                <span className="section-label">Activity history</span>
-                <span className="text-[11px] text-faint">
-                  Recent completed runs stay available when the app is stopped.
+                <span
+                  className="section-label whitespace-nowrap"
+                  title="Recent completed runs stay available when the app is stopped."
+                >
+                  Activity history
                 </span>
                 <ProjectUsage runs={c.runHistory} />
                 {/* Every run is kept for the session. Showing only the newest
@@ -205,7 +238,7 @@ export default function ProjectShell({
                     aria-label="Choose a run from history"
                     value={shownRun?.handle.runId ?? ''}
                     onChange={(e) => setPickedRunId(e.target.value)}
-                    className="ml-auto h-7 max-w-[280px] rounded-md border border-line bg-surface px-2 text-xs"
+                    className="h-7 max-w-[300px] shrink-0 rounded-md border border-line bg-surface px-2 text-[12px] text-body hover:border-line-strong"
                   >
                     {[...c.runHistory].reverse().map((run, i) => {
                       // Only agent runs report anything; docker and git say
@@ -235,15 +268,12 @@ export default function ProjectShell({
             </div>
             <div>
               <div className="mb-2 flex items-center gap-3">
-                <span className="section-label">App logs</span>
-                <span className="text-[11px] text-faint">
-                  live output from the running containers
+                <span className="section-label whitespace-nowrap">App logs</span>
+                <span className="truncate text-[11.5px] text-faint">
+                  live, from the running containers
                 </span>
                 {project.status === 'running' && !appLogsActive && (
-                  <button
-                    onClick={() => void c.startAppLogs()}
-                    className="ml-auto text-xs text-go hover:text-go-hover hover:underline"
-                  >
+                  <button onClick={() => void c.startAppLogs()} className="ml-auto text-xs link">
                     Start streaming
                   </button>
                 )}
@@ -270,38 +300,6 @@ export default function ProjectShell({
   );
 }
 
-/** What each kind of run is called, for someone reading their own logs. */
-const RUN_LABELS: Record<string, string> = {
-  'bootstrap-plan': 'Working out what the app needs',
-  bootstrap: 'Setting the app up',
-  'docker-up': 'Starting the environment',
-  'docker-down': 'Stopping the environment',
-  'ide-up': 'Starting the editor',
-  'ide-down': 'Stopping the editor',
-  migrate: 'Applying database migrations',
-  seed: 'Adding the demo login and sample data',
-  triage: 'Diagnosing a failure',
-  instruct: 'Making a change',
-  chat: 'Answering in the App tab',
-  sync: 'Syncing repositories',
-  readiness: 'Checking launch readiness',
-  'readiness-fix': 'Fixing a readiness finding',
-  'launch-plan': 'Pricing a launch',
-  'plan-spec': 'Writing a product spec',
-  'plan-story': 'Implementing a story',
-  ship: 'Shipping a pull request',
-  'raise-pr': 'Raising pull requests',
-  'auto-merge': 'Asking GitHub to merge when checks pass',
-  'run-client': 'Starting the app on your machine',
-  'push-feature': 'Pushing the feature to Feature1',
-  'sync-feature': 'Syncing the feature with Feature1',
-  share: 'Sharing the app',
-  'feature-change': 'Changing the feature',
-  'resolve-merge': 'Resolving merge conflicts',
-  'install-tools': 'Installing the required tools',
-  'git-auth': 'Connecting git to GitHub',
-};
-
 function Pane({
   active,
   scroll,
@@ -324,16 +322,23 @@ function Pane({
 }
 
 function Placeholder({
+  icon: Icon,
   title,
   body,
   action,
 }: {
+  icon?: LucideIcon;
   title: string;
   body: string;
   action?: { label: string; onClick: () => void; primary?: boolean; disabled?: boolean };
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+      {Icon && (
+        <span className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-surface text-muted shadow-card">
+          <Icon size={20} strokeWidth={1.5} aria-hidden />
+        </span>
+      )}
       <h2 className="text-[15px] font-semibold">{title}</h2>
       <p className="mt-1 max-w-[420px] text-[13px] leading-normal text-body [text-wrap:pretty]">
         {body}
@@ -374,7 +379,7 @@ function ProjectUsage({ runs }: { runs: RunState[] }) {
         `sent ${sent.toLocaleString()} tokens, ${cached.toLocaleString()} of them from cache\n` +
         `wrote ${wrote.toLocaleString()}`
       }
-      className="ml-auto font-mono text-[11px] text-muted"
+      className="ml-auto truncate font-mono text-[11px] text-muted"
     >
       {used.length} agent runs · {shortCount(sent)} in
       {cached > 0 && ` (${shortCount(cached)} cached)`} · {shortCount(wrote)} out

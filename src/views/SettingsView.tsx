@@ -1,19 +1,16 @@
+import { ArrowUpRight, Monitor, Moon, Sun } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   AgentKind,
-  CliName,
   CliStatus,
   DEFAULT_STACK,
-  InstallPlan,
   MvpfyState,
   RELEASES_URL,
   macInstallerUrl,
-  UpdateStatus,
 } from '../../shared/types';
 import { UpdateState } from '../hooks/useProjectController';
 import { CLI_HELP, cliRequired, installHintFor } from '../lib/cliCheck';
-import { useFeature1Login } from '../hooks/useFeature1Login';
-import { startInstallToolsRun } from '../lib/agentRunner';
+import { useSettingsController } from '../hooks/useSettingsController';
 
 interface Props {
   version: string;
@@ -23,11 +20,6 @@ interface Props {
   updateState: UpdateState;
   /** Which card to scroll into view on open — set by the connect nudge. */
   focus?: 'feature1' | null;
-}
-
-let runSeq = 0;
-function nextRunId(kind: string, tool: string): string {
-  return `cli-${kind}-${tool}-${++runSeq}`;
 }
 
 export const FEATURE1_CARD_ID = 'settings-feature1';
@@ -40,170 +32,39 @@ export default function SettingsView({
   updateState,
   focus = null,
 }: Props) {
-  const login = useFeature1Login(state, updateState);
-  const [checking, setChecking] = useState(false);
-  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const {
+    login,
+    checking,
+    update,
+    updateLine,
+    gh,
+    toolRun,
+    toolLog,
+    lastInstallLog,
+    plans,
+    hasTunnel,
+    planFor,
+    brewPlan,
+    models,
+    signIn,
+    install,
+    missingTools,
+    installableNow,
+    needOwnWindow,
+    agentPresent,
+    signInStreams,
+    signInAll,
+    installAll,
+    askAgentToInstall,
+    checkForUpdates,
+    openExternal,
+    installUpdate,
+  } = useSettingsController(state, cliStatuses, onRefreshClis, updateState);
 
   useEffect(() => {
     if (focus !== 'feature1') return;
     document.getElementById(FEATURE1_CARD_ID)?.scrollIntoView({ block: 'start' });
   }, [focus]);
-
-  // An update that finishes downloading while Settings is open should change
-  // the button under the user, not wait for them to ask again. Only progress
-  // is taken from the launch check — its failures are nobody's question yet,
-  // and an offline start would otherwise greet them with an error they never
-  // asked for.
-  useEffect(
-    () =>
-      window.mvpfy.onUpdateStatus((status) => {
-        if (status.kind === 'available' || status.kind === 'downloaded') setUpdate(status);
-      }),
-    []
-  );
-
-  const updateLine = checking
-    ? 'Checking for a newer version…'
-    : update?.kind === 'downloaded'
-      ? `Version ${update.version ?? ''} is downloaded — it installs when you quit mvpfy.`
-      : update?.kind === 'available'
-        ? `Version ${update.version ?? ''} is available.`
-        : update?.kind === 'none'
-          ? 'This is the newest version.'
-          : update?.kind === 'unsupported'
-            ? 'Development builds do not update themselves.'
-            : update?.kind === 'error'
-              ? `Could not check for updates — ${update.message ?? 'the update server did not answer'}.`
-              : 'mvpfy updates itself; this is the build you are running now.';
-
-  const gh = cliStatuses.find((s) => s.name === 'gh');
-  const [toolRun, setToolRun] = useState<{
-    kind: 'login' | 'install';
-    tool: string;
-    runId: string;
-  } | null>(null);
-  const [toolLog, setToolLog] = useState('');
-  // The finished run's output, kept after the run clears so the agent can be
-  // handed what actually failed rather than being asked to guess.
-  const [lastInstallLog, setLastInstallLog] = useState('');
-  const [plans, setPlans] = useState<InstallPlan[]>([]);
-  // Not in REQUIRED_CLIS — nothing but sharing wants it, so it must never read
-  // as a missing requirement. Asked for separately for the same reason.
-  const [hasTunnel, setHasTunnel] = useState(true);
-  const planFor = (tool: string) => plans.find((p) => p.tool === tool) ?? null;
-  const brewPlan = planFor('brew');
-
-  // Installing one tool changes what the others need (Homebrew unlocks gh,
-  // Docker and Node), so the plans are recomputed whenever the checklist is.
-  useEffect(() => {
-    void window.mvpfy.installPlans().then(setPlans);
-    void window.mvpfy
-      .canShare()
-      .then(setHasTunnel)
-      .catch(() => setHasTunnel(true));
-  }, [cliStatuses]);
-
-  // The models come from the installed CLIs, so they are re-read whenever the
-  // checklist is — installing or updating an agent can change the list.
-  const [models, setModels] = useState<Record<AgentKind, string[]>>({ claude: [], codex: [] });
-  useEffect(() => {
-    void Promise.all([window.mvpfy.agentModels('claude'), window.mvpfy.agentModels('codex')]).then(
-      ([claude, codex]) => setModels({ claude, codex })
-    );
-  }, [cliStatuses]);
-
-  // Stream sign-in and install output: device codes, URLs and progress bars
-  // all matter to the person watching.
-  useEffect(() => {
-    if (!toolRun) return;
-    const offOut = window.mvpfy.onRunOutput((ev) => {
-      if (ev.runId === toolRun.runId) setToolLog((prev) => (prev + ev.chunk).slice(-4000));
-    });
-    const offExit = window.mvpfy.onRunExit((ev) => {
-      if (ev.runId === toolRun.runId) {
-        if (toolRun.kind === 'install') setLastInstallLog(toolLog);
-        setToolRun(null);
-        setToolLog('');
-        onRefreshClis();
-      }
-    });
-    return () => {
-      offOut();
-      offExit();
-    };
-  }, [toolRun, toolLog, onRefreshClis]);
-
-  function signIn(tool: string) {
-    const runId = nextRunId('login', tool);
-    setToolLog('');
-    setToolRun({ kind: 'login', tool, runId });
-    void window.mvpfy.cliLogin(runId, tool).catch(() => setToolRun(null));
-  }
-
-  function install(tool: string) {
-    const runId = nextRunId('install', tool);
-    setToolLog('');
-    setToolRun({ kind: 'install', tool, runId });
-    void window.mvpfy.installTool(runId, tool).catch(() => setToolRun(null));
-  }
-
-  // Everything missing that installs without a password, in one run. The ones
-  // that need their own window are listed underneath instead: each has to be
-  // started by the person who can type the password.
-  const missingTools = cliStatuses
-    .filter((c) => !c.found && cliRequired(c.name, state.settings.defaultAgent))
-    .map((c) => c.name as string);
-  const installableNow = missingTools.filter(
-    (t) => planFor(t)?.available && planFor(t)?.mode === 'in-app'
-  );
-  const needOwnWindow = missingTools.filter(
-    (t) => planFor(t)?.available && planFor(t)?.mode === 'terminal'
-  );
-  // Asking the agent to install the agent is not an answer, so this is only
-  // offered once one of them is actually on the machine.
-  const agentPresent = cliStatuses.some(
-    (c) => (c.name === 'claude' || c.name === 'codex') && c.found
-  );
-
-  // Installed but not signed in is the other half of not working: gh without
-  // a sign-in fails at the push, mid-run, having looked fine in the checklist.
-  const needsSignIn = cliStatuses
-    .filter(
-      (c) =>
-        c.found &&
-        c.authenticated === false &&
-        CLI_HELP[c.name].inAppLogin &&
-        cliRequired(c.name, state.settings.defaultAgent)
-    )
-    .map((c) => c.name as string);
-  // A sign-in that opens its own window has to be started by the person who
-  // will answer it — three windows at once, in no stated order, is worse.
-  const signInStreams = needsSignIn.filter((t) => !CLI_HELP[t as CliName].loginInTerminal);
-
-  function signInAll() {
-    if (signInStreams.length === 0) return;
-    const runId = nextRunId('login', 'all');
-    setToolLog('');
-    setToolRun({ kind: 'login', tool: 'all', runId });
-    void window.mvpfy.signInAll(runId, signInStreams).catch(() => setToolRun(null));
-  }
-
-  function installAll() {
-    if (installableNow.length === 0) return;
-    const runId = nextRunId('install', 'all');
-    setLastInstallLog('');
-    setToolLog('');
-    setToolRun({ kind: 'install', tool: 'all', runId });
-    void window.mvpfy.installAll(runId, installableNow).catch(() => setToolRun(null));
-  }
-
-  function askAgentToInstall() {
-    if (missingTools.length === 0 || !agentPresent) return;
-    setToolLog('');
-    void startInstallToolsRun(state.settings, missingTools, lastInstallLog)
-      .then((handle) => setToolRun({ kind: 'install', tool: 'agent', runId: handle.runId }))
-      .catch(() => setToolRun(null));
-  }
 
   return (
     <div className="mx-auto w-full max-w-[660px] px-6 pb-16 pt-9">
@@ -232,10 +93,7 @@ export default function SettingsView({
               {toolRun?.tool === 'all' ? 'Installing…' : `Install all (${installableNow.length})`}
             </button>
           )}
-          <button
-            onClick={onRefreshClis}
-            className="text-xs text-go hover:text-go-hover hover:underline"
-          >
+          <button onClick={onRefreshClis} className="text-xs link">
             Re-check
           </button>
         </div>
@@ -262,9 +120,11 @@ export default function SettingsView({
                       : 'bg-go'
                 }`}
               />
-              <span className="w-24 text-[13px] font-medium">
+              <span className="w-[150px] shrink-0 whitespace-nowrap text-[13px] font-medium">
                 {help.label}
-                {!required && <span className="ml-1 text-[10px] text-faint">optional</span>}
+                {!required && (
+                  <span className="ml-1.5 text-[11px] font-normal text-faint">optional</span>
+                )}
               </span>
               <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted">
                 {cli.found ? cli.path : installHintFor(cli.name)}
@@ -306,10 +166,16 @@ export default function SettingsView({
                     <span className="shrink-0 text-[11.5px] text-warn-text">{plan.note}</span>
                   )}
                   <button
-                    onClick={() => void window.mvpfy.openExternal(help.installUrl)}
-                    className="shrink-0 text-[11.5px] text-go hover:underline"
+                    onClick={() => openExternal(help.installUrl)}
+                    className="link shrink-0 text-[11.5px]"
                   >
-                    Install ↗
+                    Install
+                    <ArrowUpRight
+                      size={12}
+                      strokeWidth={1.8}
+                      className="ml-0.5 inline-block align-[-1px]"
+                      aria-hidden
+                    />
                   </button>
                 </>
               )}
@@ -504,11 +370,11 @@ export default function SettingsView({
           </div>
           {login.connected && state.tenant ? (
             <div className="flex shrink-0 items-center gap-3">
-              <span className="font-mono text-[11.5px] text-go">{state.tenant.host}</span>
+              <span className="font-mono text-[11.5px] text-body">{state.tenant.host}</span>
               <button
                 onClick={() => void login.connect()}
                 disabled={login.status === 'waiting'}
-                className="text-[11.5px] text-go disabled:opacity-50"
+                className="link text-[11.5px] disabled:opacity-50"
               >
                 {login.status === 'waiting' ? 'Connecting…' : 'Reconnect'}
               </button>
@@ -645,6 +511,53 @@ export default function SettingsView({
         </div>
       </section>
 
+      <div className="section-label mb-3">Appearance</div>
+      <section className="card mb-7 flex items-center gap-4 px-[18px] py-4">
+        <div className="min-w-0 flex-1">
+          <p className="text-[13.5px] font-medium">Theme</p>
+          <p className="text-[12.5px] text-muted">
+            System follows your computer as it switches between light and dark.
+          </p>
+        </div>
+        <div
+          role="radiogroup"
+          aria-label="Theme"
+          className="flex shrink-0 gap-0.5 rounded-lg border border-line bg-sunken p-0.5"
+        >
+          {(
+            [
+              { id: 'dark', label: 'Dark', icon: Moon },
+              { id: 'light', label: 'Light', icon: Sun },
+              { id: 'system', label: 'System', icon: Monitor },
+            ] as const
+          ).map((option) => {
+            const chosen = (state.settings.theme ?? 'dark') === option.id;
+            const Icon = option.icon;
+            return (
+              <button
+                key={option.id}
+                role="radio"
+                aria-checked={chosen}
+                onClick={() =>
+                  updateState((prev) => ({
+                    ...prev,
+                    settings: { ...prev.settings, theme: option.id },
+                  }))
+                }
+                className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] ${
+                  chosen
+                    ? 'bg-raised font-medium text-ink shadow-card'
+                    : 'text-muted hover:text-ink'
+                }`}
+              >
+                <Icon size={13} strokeWidth={1.7} aria-hidden />
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
       <div className="section-label mb-3">New products</div>
       <section className="card flex flex-col gap-2 px-[18px] py-4">
         <p className="text-[13.5px] font-medium">Built with</p>
@@ -695,7 +608,7 @@ export default function SettingsView({
               available one sends you to the download instead. */}
           {update?.kind === 'downloaded' ? (
             <button
-              onClick={() => void window.mvpfy.installUpdate()}
+              onClick={() => installUpdate()}
               className="btn-primary h-[30px] shrink-0 px-3 text-[12.5px]"
             >
               Restart to update
@@ -703,24 +616,21 @@ export default function SettingsView({
           ) : update?.kind === 'available' ? (
             <button
               onClick={() =>
-                void window.mvpfy.openExternal(
-                  update.version ? macInstallerUrl(update.version) : RELEASES_URL
-                )
+                openExternal(update.version ? macInstallerUrl(update.version) : RELEASES_URL)
               }
               className="btn-primary h-[30px] shrink-0 px-3 text-[12.5px]"
             >
-              Download {update.version ?? ''} ↗
+              Download {update.version ?? ''}
+              <ArrowUpRight
+                size={12}
+                strokeWidth={1.8}
+                className="ml-0.5 inline-block align-[-1px]"
+                aria-hidden
+              />
             </button>
           ) : (
             <button
-              onClick={() => {
-                setChecking(true);
-                setUpdate(null);
-                void window.mvpfy
-                  .checkForUpdates()
-                  .then(setUpdate)
-                  .finally(() => setChecking(false));
-              }}
+              onClick={checkForUpdates}
               disabled={checking}
               className="btn-secondary h-[30px] shrink-0 px-3 text-[12.5px] disabled:opacity-50"
             >
@@ -728,10 +638,16 @@ export default function SettingsView({
             </button>
           )}
           <button
-            onClick={() => void window.mvpfy.openExternal(RELEASES_URL)}
-            className="shrink-0 text-[12.5px] text-go hover:underline"
+            onClick={() => openExternal(RELEASES_URL)}
+            className="link shrink-0 text-[12.5px]"
           >
-            Release notes ↗
+            Release notes
+            <ArrowUpRight
+              size={12}
+              strokeWidth={1.8}
+              className="ml-0.5 inline-block align-[-1px]"
+              aria-hidden
+            />
           </button>
         </div>
       </section>

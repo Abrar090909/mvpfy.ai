@@ -5,6 +5,7 @@ import { AppTarget, PROJECT_APP_ID, agentReply, titleFrom } from '../lib/chat';
 import { preflightAuth } from '../lib/cliCheck';
 import type { RunState } from '../lib/useRuns';
 import { ControllerContext } from './controllerContext';
+import { useHandled } from '../lib/useRuns';
 
 export interface AppChat {
   /** The parts of the product the App tab can show and talk to, the whole project first. */
@@ -70,7 +71,7 @@ export function useAppChat(
   const [chatError, setChatError] = useState<string | null>(null);
   const [restartedAt, setRestartedAt] = useState<Record<string, number>>({});
   const stopping = useRef(new Set<string>());
-  const processed = useRef(new Set<string>());
+  const processed = useHandled(runsApi, `${project.id}:chat-turn`);
 
   // The first part with a page of its own is what somebody opening the tab
   // came to look at; the whole project is there for everything else.

@@ -1,4 +1,5 @@
 import { updateLocalDatabase } from '../lib/prepareFeaturePreview';
+import { worktreeProjectKey } from '../../shared/slug';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ANSWERS_FILE,
@@ -24,7 +25,7 @@ import {
 import { preflightAuth } from '../lib/cliCheck';
 import { needsAnswer, parseComponents } from '../lib/components';
 import { parseTenancy, tenancyNeedsAnswer } from '../lib/tenancy';
-import { RunState } from '../lib/useRuns';
+import { RunState, useHandled } from '../lib/useRuns';
 import { ControllerContext, contentOf } from './controllerContext';
 import { parseTunnelUrl, tunnelRefused } from '../lib/tunnel';
 import { hostFromDemoLogin } from '../lib/shareHost';
@@ -322,7 +323,7 @@ export function useProjectActions(
   // work flows into starting the app — each step once per run, even if
   // several renders observe the same completion. The PM's own gate is the
   // last card, where they say whether they can actually use the thing.
-  const chained = useRef(new Set<string>());
+  const chained = useHandled(runsApi, `${project.id}:setup-chain`);
   useEffect(() => {
     for (const run of projectRuns) {
       if (run.running || run.exitCode !== 0) continue;
@@ -760,7 +761,10 @@ export function useProjectActions(
       setRemoving(true);
       try {
         if (latestRun?.running) runsApi.stop(latestRun.handle.runId);
-        const res = await window.mvpfy.deleteProject(project.localPath);
+        const res = await window.mvpfy.deleteProject(
+          project.localPath,
+          worktreeProjectKey(project.localPath, project.id)
+        );
         if (!res.ok) throw new Error(res.error || 'Failed to delete project files');
         updateState((prev) => ({
           ...prev,

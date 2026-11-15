@@ -27,7 +27,7 @@ export default function PlanActivityPanel({ runs, onStop }: Props) {
   return (
     <section
       aria-label="Implementation activity"
-      className="shrink-0 border-t border-line bg-surface shadow-[0_-4px_16px_-12px_rgba(27,26,23,0.2)]"
+      className="shrink-0 border-t border-line bg-surface"
     >
       <button
         type="button"
