@@ -44,6 +44,18 @@ export default tseslint.config(
     },
   },
   {
+    // The website (docs/, served by GitHub Pages): plain scripts in a browser.
+    files: ['docs/**/*.js'],
+    languageOptions: {
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        navigator: 'readonly',
+        localStorage: 'readonly',
+      },
+    },
+  },
+  {
     // A harness driven by a real browser: CommonJS on the Node side and
     // browser globals on the other, which is neither of the two worlds the
     // rest of this config describes.
