@@ -1,25 +1,11 @@
-import { useState } from 'react';
-import { BlankProjectRemote, MvpfyState, Project } from '../../shared/types';
+import { BlankProjectRemote, MvpfyState } from '../../shared/types';
 import { UpdateState } from '../hooks/useProjectController';
-import { allocateBasePort, newProjectId } from '../lib/state';
+import { useAddProject } from '../hooks/useAddProject';
 
 interface Props {
   state: MvpfyState;
   updateState: UpdateState;
   onCreated: (projectId: string) => void;
-}
-
-/** Repo entries from the textarea: one per line (commas allowed too). */
-function splitEntries(text: string): string[] {
-  return text
-    .split(/[\n,]+/)
-    .map((u) => u.trim())
-    .filter(Boolean);
-}
-
-/** Absolute, home-relative, relative, or Windows drive-letter path. */
-function isLocalPath(entry: string): boolean {
-  return /^([~/.]|[A-Za-z]:[\\/])/.test(entry);
 }
 
 const STEPS = [
@@ -29,104 +15,35 @@ const STEPS = [
 ] as const;
 
 export default function AddProjectView({ state, updateState, onCreated }: Props) {
-  const [text, setText] = useState('');
-  const [cloning, setCloning] = useState(false);
-  const [inPlace, setInPlace] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [source, setSource] = useState<'existing' | 'new'>('existing');
-  const [newName, setNewName] = useState('');
-  const [remoteKind, setRemoteKind] = useState<BlankProjectRemote['kind']>('create');
-  const [remoteUrl, setRemoteUrl] = useState('');
-  const [notice, setNotice] = useState<string | null>(null);
-  const firstRun = state.projects.length === 0;
-  const entries = splitEntries(text);
-  // In-place mode works from one folder root, so it is only offered for a
-  // single local entry — several repos come in as copies.
-  const looksLocal = entries.length === 1 && isLocalPath(entries[0]);
-
-  async function add() {
-    const urls = entries;
-    if (urls.length === 0 || cloning) return;
-    const link = inPlace && looksLocal;
-    if (inPlace && urls.length > 1) {
-      setError(
-        'In-place mode takes a single local folder. To use several repos in place, pick the folder that contains them.'
-      );
-      return;
-    }
-    setCloning(true);
-    setError(null);
-    try {
-      const result = await window.mvpfy.createProject(urls, link);
-      if (!result.ok) {
-        setError(result.error || 'Clone failed');
-        return;
-      }
-      const project: Project = {
-        id: newProjectId(),
-        repos: result.repos.map(({ url, dir }) => ({ url, dir })),
-        localPath: result.workspacePath,
-        basePort: await allocateBasePort(state),
-        // Bootstrap starts by itself once the project view opens.
-        status: 'queued',
-        lastStoryId: null,
-        generatedFiles: [],
-        mode: link ? 'linked' : 'managed',
-      };
-      updateState((prev) => ({ ...prev, projects: [...prev.projects, project] }));
-      setText('');
-      onCreated(project.id);
-    } finally {
-      setCloning(false);
-    }
-  }
-
-  async function startFromScratch() {
-    if (!newName.trim() || cloning) return;
-    setCloning(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const remote: BlankProjectRemote =
-        remoteKind === 'existing' ? { kind: 'existing', url: remoteUrl } : { kind: remoteKind };
-      const result = await window.mvpfy.createBlankProject(newName, remote);
-      if (!result.ok) {
-        setError(result.error || 'Could not create the project');
-        return;
-      }
-      const project: Project = {
-        id: newProjectId(),
-        repos: result.repos.map(({ url, dir }) => ({ url, dir })),
-        localPath: result.workspacePath,
-        basePort: await allocateBasePort(state),
-        // Not 'queued': that bootstraps on open, and there is nothing here to
-        // work out how to run yet. The environment is set up once the first
-        // story has built something — until then the button is there to press.
-        status: 'cloned',
-        lastStoryId: null,
-        generatedFiles: [],
-        mode: 'managed',
-      };
-      if (result.remoteError) {
-        // The workspace is real and usable; only GitHub is missing. Losing the
-        // project over that would be worse than saying so.
-        setNotice(
-          `The project was created, but GitHub was not: ${result.remoteError}\nEverything works except raising a pull request — add a remote when you are ready.`
-        );
-      }
-      updateState((prev) => ({ ...prev, projects: [...prev.projects, project] }));
-      setNewName('');
-      onCreated(project.id);
-    } finally {
-      setCloning(false);
-    }
-  }
+  const {
+    text,
+    setText,
+    cloning,
+    inPlace,
+    setInPlace,
+    error,
+    setError,
+    source,
+    setSource,
+    newName,
+    setNewName,
+    remoteKind,
+    setRemoteKind,
+    remoteUrl,
+    setRemoteUrl,
+    notice,
+    firstRun,
+    looksLocal,
+    add,
+    startFromScratch,
+    browse,
+  } = useAddProject(state, updateState, onCreated);
 
   return (
-    <div className="mx-auto grid w-full max-w-[1080px] items-start gap-10 px-6 py-12 lg:grid-cols-[0.8fr_1.2fr] lg:gap-16 lg:py-20">
+    <div className="mx-auto grid w-full max-w-[1080px] items-start gap-10 px-6 py-12 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:gap-14 lg:py-16">
       <div className="lg:sticky lg:top-10">
-        <span className="section-label text-brand">Your product workspace</span>
-        <h2 className="mt-4 text-4xl font-semibold leading-[1.15] tracking-[-0.04em] lg:text-[44px]">
+        <span className="chip">Your product workspace</span>
+        <h2 className="mt-5 text-[34px] font-semibold leading-[1.08] tracking-display xl:text-[40px]">
           From idea to
           <br />
           your next release.
@@ -164,7 +81,7 @@ export default function AddProjectView({ state, updateState, onCreated }: Props)
         <h1 className="mb-5 text-[24px] font-semibold tracking-[-0.02em]">
           {firstRun ? 'Add your first project' : 'Add a project'}
         </h1>
-        <div className="mb-6 grid grid-cols-2 gap-1 rounded-xl bg-paper p-1">
+        <div className="mb-6 grid grid-cols-2 gap-1 rounded-lg border border-line bg-sunken p-1">
           {(
             [
               ['existing', 'I have code already'],
@@ -204,9 +121,9 @@ export default function AddProjectView({ state, updateState, onCreated }: Props)
         ) : (
           <>
             <p className="mb-7 text-sm leading-relaxed text-body [text-wrap:pretty]">
-              Add a GitHub repository or a local folder. Coming from Replit or Lovable? Connect your
-              project to GitHub first, then paste its repository URL here. Setup takes a few minutes
-              and uses your agent subscription.
+              Add a GitHub repository or a local folder. On Replit or Lovable? Push your project to
+              GitHub first, then paste its URL here. Setup takes a few minutes on your agent
+              subscription.
             </p>
 
             <label htmlFor="project-repositories" className="section-label mb-1.5 block">
@@ -231,16 +148,7 @@ export default function AddProjectView({ state, updateState, onCreated }: Props)
                 {cloning ? 'Adding…' : 'Add & bootstrap'}
               </button>
               <button
-                onClick={() =>
-                  void window.mvpfy.pickDirectory().then((dirs) => {
-                    if (!dirs?.length) return;
-                    setText((prev) => {
-                      const existing = splitEntries(prev);
-                      const added = dirs.filter((d) => !existing.includes(d));
-                      return [...existing, ...added].join('\n');
-                    });
-                  })
-                }
+                onClick={browse}
                 disabled={cloning}
                 className="btn-secondary h-[38px] px-4 text-sm disabled:opacity-50"
               >

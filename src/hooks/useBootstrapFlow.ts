@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { BOOTSTRAP_FILE } from '../../shared/types';
 import {
   bareFilePath,
@@ -105,7 +105,9 @@ export function useBootstrapFlow(ctx: ControllerContext, appHealthy: boolean): B
   // answer to a missing one is written back there, because the run that builds
   // the environment reads that file and nothing else.
   const bootstrapRaw = contentOf(files, pf(BOOTSTRAP_FILE));
-  const productComponents = parseComponents(bootstrapRaw);
+  // Parsed when the file changes, not on every render: this hook re-runs on
+  // each log flush, and the result is handed on to things that memoize on it.
+  const productComponents = useMemo(() => parseComponents(bootstrapRaw), [bootstrapRaw]);
 
   const writeComponents = async (next: ProductComponent[]) => {
     if (!bootstrapRaw?.trim()) throw new Error('Setting up has not read your product yet.');

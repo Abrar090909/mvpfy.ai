@@ -17,7 +17,7 @@ export default function ConnectFeature1Banner({ onConnect, onDismiss }: Props) {
     >
       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-dot-idle" />
       <p className="min-w-0 flex-1 text-[13px] text-body">
-        <span className="font-medium text-ink">Your plan lives only on this Mac.</span> Connect
+        <span className="font-medium text-ink">Your plan lives only on this computer.</span> Connect
         Feature1 to share the PRD and stories with your team, track each story to Done, and let
         engineers pick them up from their own tools.
       </p>

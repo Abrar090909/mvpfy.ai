@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { QUESTIONS_FILE, READINESS_FILE } from '../../shared/types';
 import { startReadinessFixRun, startReadinessRun } from '../lib/agentRunner';
 import { preflightAuth } from '../lib/cliCheck';
@@ -12,6 +12,7 @@ import {
   verdictFor,
 } from '../lib/readiness';
 import { ControllerContext, contentOf } from './controllerContext';
+import { useHandled } from '../lib/useRuns';
 
 export interface ReadinessActions {
   /** Findings from the last check, with the builder's decisions applied. */
@@ -72,7 +73,7 @@ export function useReadinessActions(ctx: ControllerContext): ReadinessActions {
   // A finished fix run is not a fixed finding: re-run the check and let the
   // report decide whether it is actually gone. The agent is forbidden from
   // touching the report itself, so this is the only thing that can close one.
-  const rechecked = useRef(new Set<string>());
+  const rechecked = useHandled(runsApi, `${project.id}:readiness-recheck`);
   useEffect(() => {
     for (const run of projectRuns) {
       if (run.handle.kind !== 'readiness-fix' || run.running || run.exitCode !== 0) continue;
@@ -88,7 +89,7 @@ export function useReadinessActions(ctx: ControllerContext): ReadinessActions {
   // It waits for bootstrap rather than starting on add because the setup's own
   // notes — which services are stand-ins, which settings are throwaway — are
   // its best evidence. Read-only, so it runs alongside the app starting up.
-  const chained = useRef(new Set<string>());
+  const chained = useHandled(runsApi, `${project.id}:readiness-chain`);
   useEffect(() => {
     for (const run of projectRuns) {
       if (run.handle.kind !== 'bootstrap' || run.running || run.exitCode !== 0) continue;

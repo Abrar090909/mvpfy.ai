@@ -11,7 +11,7 @@ const BADGE: Record<TaskLane, string> = {
   check: 'bg-warn-bg text-warn-text',
   testing: 'bg-warn-bg text-warn-text',
   done: 'bg-go-bg text-go',
-  blocked: 'bg-red-50 text-danger',
+  blocked: 'bg-danger-bg text-danger',
 };
 
 /** Why a card says what it says — the PM can hover any badge to find out. */

@@ -1,3 +1,4 @@
+import { ArrowUpRight } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { ProjectController } from '../hooks/useProjectController';
 import { envStatusFor, envStatusHint, envStatusLabel, parseEnv } from '../lib/envFile';
@@ -209,15 +210,13 @@ function FlowPolicy({ c }: { c: ProjectController }) {
         {trunk ? (
           <>
             <span className="font-medium text-body">Every story is pushed to the trunk.</span> No
-            branches and no pull requests — each story is committed on the default branch and pushed
-            as soon as its tests pass, so the trunk always has everything built so far. Features
-            take turns, and unfinished work goes behind a feature flag.
+            branches or pull requests: each story lands on the default branch once its tests pass.
+            Features take turns; unfinished work hides behind a feature flag.
           </>
         ) : (
           <>
             <span className="font-medium text-body">Each feature gets its own branch.</span> Its
-            stories build up there, apart from the trunk, and one pull request opens once you have
-            accepted the whole feature.
+            stories build up there, and one pull request opens once you accept the whole feature.
           </>
         )}
         {pinned && (
@@ -333,14 +332,14 @@ function ClientRun({
     });
   }
 
-  if (running) return <span className="ml-auto text-[11.5px] text-go">starting…</span>;
+  if (running) return <span className="ml-auto text-[11.5px] text-work">starting…</span>;
   if (!phone || choices.length === 1) {
     return (
       <button
         onClick={() => void c.runClient(component, choices[0]?.target)}
         disabled={c.busy}
         title="mvpfy asks your agent to start this on your machine, pointed at the backend already running here"
-        className="ml-auto text-[11.5px] text-go hover:underline disabled:opacity-50"
+        className="ml-auto text-[11.5px] link disabled:opacity-50"
       >
         run it on my machine
       </button>
@@ -356,7 +355,7 @@ function ClientRun({
           setOpen((v) => !v);
         }}
         disabled={c.busy}
-        className="text-[11.5px] text-go hover:underline disabled:opacity-50"
+        className="text-[11.5px] link disabled:opacity-50"
       >
         run it {open ? '↑' : '↓'}
       </button>
@@ -549,7 +548,7 @@ function ProductComponents({ c }: { c: ProjectController }) {
                       setPointing(p.id);
                       setUrl(p.url ?? '');
                     }}
-                    className="ml-auto text-[11.5px] text-go hover:underline"
+                    className="ml-auto text-[11.5px] link"
                   >
                     {local ? 'point at a URL' : 'change'}
                   </button>
@@ -610,7 +609,7 @@ function ProductComponents({ c }: { c: ProjectController }) {
                   setTenant(c.tenancy?.local ?? '');
                   setTenantEditing(true);
                 }}
-                className="mt-1 text-[11.5px] text-go hover:underline"
+                className="mt-1 text-[11.5px] link"
               >
                 {c.tenancy.local ? 'change which customer' : 'say which customer'}
               </button>
@@ -671,10 +670,7 @@ function ProductComponents({ c }: { c: ProjectController }) {
                   ? 'Setting up waits for these. Everything else it found it will build without asking.'
                   : 'Reading your code found these. Anything it could not see, you can add.'}
               </span>
-              <button
-                onClick={() => setAdding(true)}
-                className="text-[11.5px] text-go hover:underline"
-              >
+              <button onClick={() => setAdding(true)} className="text-[11.5px] link">
                 Something is missing
               </button>
             </div>
@@ -703,20 +699,12 @@ function RebuildButton({ c, className = '' }: { c: ProjectController; className?
 
 export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
   const { project } = c;
-  const [branches, setBranches] = useState<Record<string, string>>({});
-  const [remotes, setRemotes] = useState<Record<string, string>>({});
+  const branches = c.repoBranches;
+  const remotes = c.repoRemotes;
   const [copied, setCopied] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [forceArmed, setForceArmed] = useState(false);
   const [confirmRerun, setConfirmRerun] = useState(false);
-
-  useEffect(() => {
-    if (c.busy) return;
-    void window.mvpfy.repoBranches(project.repos.map((r) => r.dir)).then(setBranches);
-    // Asked of git rather than taken from the project record, which describes
-    // the remote it was created with and not one added since.
-    void window.mvpfy.repoRemotes(project.repos.map((r) => r.dir)).then(setRemotes);
-  }, [project.repos, c.busy]);
 
   const env = envState(c);
   const stoppedNames = c.stoppedServices
@@ -840,7 +828,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
       )}
 
       {c.actionError && (
-        <div className="mb-5 rounded-lg border border-danger/30 bg-red-50 px-4 py-2.5 text-[13px] text-danger">
+        <div className="mb-5 rounded-lg border border-danger/30 bg-danger-bg px-4 py-2.5 text-[13px] text-danger">
           {c.actionError}
         </div>
       )}
@@ -885,9 +873,15 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                     {env.kind === 'running' && (
                       <button
                         onClick={() => c.openExternal(c.appUrl)}
-                        className="h-[34px] rounded-md bg-go px-3.5 text-[13px] font-medium text-white hover:bg-go-hover"
+                        className="h-[34px] rounded-md bg-go px-3.5 text-[13px] font-medium text-onink hover:bg-go-hover"
                       >
-                        Open localhost:{project.basePort} ↗
+                        Open localhost:{project.basePort}
+                        <ArrowUpRight
+                          size={12}
+                          strokeWidth={1.8}
+                          className="ml-0.5 inline-block align-[-1px]"
+                          aria-hidden
+                        />
                       </button>
                     )}
                     <button
@@ -921,7 +915,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                       title="Kill the containers immediately, without waiting for them to shut down cleanly"
                       className={`h-[34px] rounded-md px-3 text-[13px] ${
                         forceArmed
-                          ? 'bg-danger font-medium text-white'
+                          ? 'bg-danger font-medium text-onink'
                           : 'text-muted hover:text-danger'
                       }`}
                     >
@@ -996,10 +990,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                 .map((p) => (
                   <PortItem key={p.port} label={p.label} port={p.port} />
                 ))}
-              <button
-                onClick={() => onOpenTab('logs')}
-                className="ml-auto text-xs text-go hover:text-go-hover hover:underline"
-              >
+              <button onClick={() => onOpenTab('logs')} className="ml-auto text-xs link">
                 View logs
               </button>
             </div>
@@ -1145,10 +1136,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
               >
                 {confirmRerun ? 'Re-run setup — confirm' : 'Re-run setup'}
               </button>
-              <button
-                onClick={c.refresh}
-                className="text-xs text-go hover:text-go-hover hover:underline"
-              >
+              <button onClick={c.refresh} className="text-xs link">
                 Refresh
               </button>
             </div>
@@ -1165,7 +1153,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                       onClick={() => c.setActiveFile(f.relativePath)}
                       className={`h-7 rounded-md px-[11px] font-mono text-xs ${
                         c.activeFile === f.relativePath
-                          ? 'bg-ink text-white'
+                          ? 'border border-line-strong bg-raised text-ink'
                           : 'border border-line bg-surface text-body hover:bg-paper hover:text-ink'
                       }`}
                     >
@@ -1188,10 +1176,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                   {c.plans.length} feature{c.plans.length === 1 ? '' : 's'}
                 </span>
               )}
-              <button
-                onClick={() => onOpenTab('plan')}
-                className="ml-auto text-xs text-go hover:text-go-hover hover:underline"
-              >
+              <button onClick={() => onOpenTab('plan')} className="ml-auto text-xs link">
                 {c.plans.length > 0 ? 'Open board' : 'Plan a feature'}
               </button>
             </div>
@@ -1259,9 +1244,15 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                           {story.prUrl && (
                             <button
                               onClick={() => c.openExternal(story.prUrl!)}
-                              className="font-mono text-[10.5px] text-go hover:underline"
+                              className="font-mono text-[10.5px] link"
                             >
-                              PR ↗
+                              PR
+                              <ArrowUpRight
+                                size={12}
+                                strokeWidth={1.8}
+                                className="ml-0.5 inline-block align-[-1px]"
+                                aria-hidden
+                              />
                             </button>
                           )}
                           <span
@@ -1293,9 +1284,8 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
             <section className="card px-[18px] py-4">
               <h2 className="section-label">Local database</h2>
               <p className="mt-2 text-xs leading-relaxed text-body">
-                After pulling merged code, apply its pending migrations and restart the app. Uses
-                the code currently checked out. Database volumes are preserved; migrations are not
-                rolled back when switching branches.
+                Apply the migrations that came with merged code, then restart the app. Your data is
+                kept, and migrations are not rolled back when you switch branches.
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-3">
                 <button
@@ -1305,10 +1295,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                 >
                   {c.updatingDatabase ? 'Updating database…' : 'Update database'}
                 </button>
-                <button
-                  onClick={() => onOpenTab('logs')}
-                  className="text-xs text-go hover:underline"
-                >
+                <button onClick={() => onOpenTab('logs')} className="text-xs link">
                   View logs
                 </button>
               </div>
@@ -1322,7 +1309,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
               <button
                 onClick={() => void c.syncRepos()}
                 disabled={c.busy}
-                className="text-[11.5px] text-go hover:text-go-hover hover:underline disabled:opacity-50"
+                className="text-[11.5px] link disabled:opacity-50"
                 title="Pull the latest changes from each repo's remote"
               >
                 Sync
@@ -1336,10 +1323,17 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                     {remote ? (
                       <button
                         onClick={() => /^https?:/.test(remote) && c.openExternal(remote)}
-                        className="text-[13px] font-medium text-ink hover:text-go"
+                        className="text-[13px] font-medium text-ink underline-offset-[3px] hover:underline"
                       >
                         {remote.replace(/^https?:\/\/github\.com\//, '').replace(/^\/.*\//, '')}
-                        {/^https?:/.test(remote) && ' ↗'}
+                        {/^https?:/.test(remote) && (
+                          <ArrowUpRight
+                            size={12}
+                            strokeWidth={1.8}
+                            className="ml-0.5 inline-block align-[-1px]"
+                            aria-hidden
+                          />
+                        )}
                       </button>
                     ) : (
                       <span className="text-[13px] font-medium text-muted">No remote yet</span>
@@ -1363,7 +1357,7 @@ export default function OverviewView({ c, mvpfyYml, onOpenTab }: Props) {
                   onClick={() =>
                     copy('all', cred.fields.map((f) => `${f.key}: ${f.value}`).join('\n'))
                   }
-                  className="text-[11.5px] text-go hover:text-go-hover hover:underline"
+                  className="text-[11.5px] link"
                 >
                   {copied === 'all' ? 'Copied' : 'Copy all'}
                 </button>
@@ -1515,16 +1509,14 @@ function WhatIsRunning({
 
   const withService = c.componentEnvFiles.filter((f) => f.service);
   const serviceKey = withService.map((f) => f.service).join('|');
-  const workspace = c.project.localPath;
-  const linked = c.project.mode === 'linked';
+  const { serviceEnv } = c;
 
   useEffect(() => {
     if (!open || !serviceKey) return;
     let current = true;
     void Promise.all(
       serviceKey.split('|').map((service) =>
-        window.mvpfy
-          .serviceEnv(workspace, linked, service)
+        serviceEnv(service)
           .then((env) => [service, env] as const)
           .catch(() => [service, null] as const)
       )
@@ -1535,7 +1527,7 @@ function WhatIsRunning({
       current = false;
     };
     // Asked when it is opened, so a closed panel costs nothing.
-  }, [open, serviceKey, workspace, linked]);
+  }, [open, serviceKey, serviceEnv]);
 
   const repos = c.project.repos;
   const onDifferentBranches =
@@ -1546,7 +1538,7 @@ function WhatIsRunning({
       <button
         onClick={() => setOpen((was) => !was)}
         aria-expanded={open}
-        className="text-[11.5px] text-go hover:underline"
+        className="text-[11.5px] link"
       >
         {open ? 'Hide what is running' : 'What is running?'}
       </button>
@@ -1645,7 +1637,7 @@ function WhichCode({ c, featureName }: { c: ProjectController; featureName: stri
               ? 'A story is being implemented — its code is still changing.'
               : 'Put every repository back on its default branch and restart the app'
           }
-          className="text-[11.5px] text-go hover:underline disabled:opacity-50 disabled:no-underline"
+          className="text-[11.5px] link disabled:opacity-50 disabled:no-underline"
         >
           {c.preparingPreview ? 'Switching…' : 'Run main instead'}
         </button>
@@ -1684,8 +1676,8 @@ function AddRepository({ c }: { c: ProjectController }) {
   };
 
   const browse = () =>
-    void window.mvpfy.pickDirectory().then((dirs) => {
-      if (!dirs?.length) return;
+    void c.pickDirectories().then((dirs) => {
+      if (!dirs.length) return;
       setText((prev) => {
         const existing = prev
           .split('\n')
@@ -1740,10 +1732,7 @@ function AddRepository({ c }: { c: ProjectController }) {
       )}
 
       {!open ? (
-        <button
-          onClick={() => setOpen(true)}
-          className="self-start text-[11.5px] text-go hover:underline"
-        >
+        <button onClick={() => setOpen(true)} className="self-start text-[11.5px] link">
           Add a repository
         </button>
       ) : (
@@ -1798,7 +1787,7 @@ function AddRemote({ c, dir }: { c: ProjectController; dir: string }) {
   const [url, setUrl] = useState('');
   if (!open) {
     return (
-      <button onClick={() => setOpen(true)} className="mt-1 text-[11.5px] text-go hover:underline">
+      <button onClick={() => setOpen(true)} className="mt-1 text-[11.5px] link">
         Add a remote
       </button>
     );
@@ -1897,7 +1886,7 @@ function ShareApp({ c }: { c: ProjectController }) {
             </span>
             <button
               onClick={() => c.openExternal(c.shareUrl!)}
-              className="mt-1 block max-w-full truncate font-mono text-[12.5px] text-go hover:underline"
+              className="mt-1 block max-w-full truncate font-mono text-[12.5px] link"
             >
               {c.shareUrl.replace('https://', '')}
             </button>
@@ -1933,8 +1922,8 @@ function ShareApp({ c }: { c: ProjectController }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-[520px] text-[13px] text-body">
           <span className="font-medium text-ink">Show this to someone else.</span> Puts the running
-          app on a temporary public address so anyone you send it to can try it — no deploying. It
-          lasts until you stop it, and anybody with the link can use it, demo login included.
+          app on a temporary public link — no deploying. Anyone with the link can use it, demo login
+          included, until you stop it.
         </p>
         <button
           onClick={() => void c.startShare()}

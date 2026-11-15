@@ -15,7 +15,7 @@ interface Props {
 }
 
 const SEVERITY_BADGE: Record<Severity, string> = {
-  blocker: 'bg-red-50 text-danger',
+  blocker: 'bg-danger-bg text-danger',
   risk: 'bg-warn-bg text-warn-text',
   note: 'bg-paper text-muted',
 };
@@ -84,7 +84,7 @@ export default function ReadinessPanel({ c, onOpenTab }: Props) {
   return (
     <div className="flex flex-col gap-5">
       {c.actionError && (
-        <div className="rounded-lg border border-danger/30 bg-red-50 px-4 py-2.5 text-[13px] text-danger">
+        <div className="rounded-lg border border-danger/30 bg-danger-bg px-4 py-2.5 text-[13px] text-danger">
           {c.actionError}
         </div>
       )}
@@ -228,7 +228,7 @@ function LaunchSection({ c }: { c: ProjectController }) {
               onClick={() => setProvider(p)}
               className={`h-7 rounded-full border px-3 text-xs transition-colors ${
                 provider === p
-                  ? 'border-ink bg-ink text-white'
+                  ? 'border-line-strong bg-raised text-ink'
                   : 'border-line bg-surface text-body hover:border-muted'
               }`}
             >
@@ -382,10 +382,7 @@ function Finding({ c, finding }: { c: ProjectController; finding: ReadinessFindi
               </span>
             )}
             {finding.evidence.length > 0 && (
-              <button
-                onClick={() => setShowEvidence((p) => !p)}
-                className="text-[11.5px] text-go hover:text-go-hover hover:underline"
-              >
+              <button onClick={() => setShowEvidence((p) => !p)} className="text-[11.5px] link">
                 {showEvidence ? 'Hide where' : 'Show where'}
               </button>
             )}

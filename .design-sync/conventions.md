@@ -1,51 +1,77 @@
 # mvpfy UI — build conventions
 
-React components from the mvpfy desktop app (the IDE for PMs). No provider or wrapper is
-required — every component is self-contained. System font stack; no custom fonts to load.
+The mvpfy desktop app (the IDE for PMs) is a near-monochrome workspace in the manner of an agent
+IDE — dark by default, light on request — with a project sidebar, an IDE tab strip, panes and a
+status bar. Colour carries meaning; everything else is a step on one neutral ramp, and the
+strongest ink is the emphasis.
 
-## Styling idiom: purged Tailwind utility classes
+## Themes
 
-Styling is Tailwind, but the shipped `styles.css` is a **compiled, purged build**: only the
-utility classes listed below (and the others visible in `_ds_bundle.css`) exist. A Tailwind
-class not present in that stylesheet silently does nothing — before styling your own layout
-glue, check the class exists in `_ds_bundle.css`.
+Every colour is a CSS variable (`src/index.css`), one set under `:root` (dark) and one under
+`:root[data-theme='light']`; `tailwind.config.cjs` maps the tokens onto those variables, so a
+class written once works in both. Never hard-code a colour in a component — it will be right in
+one theme only. The choice (Dark / Light / System) is `settings.theme`; `src/lib/theme.ts`
+applies it and the sidebar has a one-click switch.
 
-Core vocabulary (all verified present):
+The #mvpFY logo is the original artwork. On dark it uses `assets/logo-dark.svg`, the same file
+with "#mvp" in the brand's lighter purple (#A25ED8) so it stays legible.
 
-| Purpose | Classes |
+## Tokens (tailwind.config.cjs)
+
+| Role | Classes |
 |---|---|
-| Brand purple | `bg-brand` (buttons), `bg-brand-dark` (sidebar/primary), `hover:bg-brand-hover`, `text-brand` (links) |
-| Neutral surfaces | `bg-white`, `bg-slate-50`, `bg-slate-100`, `border-slate-200`, `text-slate-500` |
-| Success / running | `bg-emerald-600`, `bg-emerald-50`, `text-emerald-700` |
-| Attention | `bg-amber-50`, `border-amber-300`, `text-amber-700` |
-| Danger | `bg-red-600`, `bg-red-50`, `text-red-600` |
-| Shape & type | `rounded-md`, `rounded-lg`, `font-mono` (URLs, code, credentials), `text-xs`/`text-sm` |
+| Canvas → surfaces | `bg-sunken` (logs, code, inputs) · `bg-paper` (canvas) · `bg-chrome` (sidebar, tab strip, status bar) · `bg-surface` (cards, panes) · `bg-raised` (selected rows, popovers, the open tab) · `bg-hoverfill` (hover) |
+| Borders | `border-line` (default) · `border-line-subtle` (dividers inside a card) · `border-line-strong` (the border of something selected) |
+| Text | `text-ink` (primary) · `text-body` (readable secondary) · `text-muted` (labels, meta) · `text-faint` (quietest still read) · `text-onink` (on an `bg-ink` fill) |
+| Meaning | `go` running / done / healthy · `work` an agent is working · `warn-*` needs a look · `danger` failed |
 
-Section headers use `text-sm font-semibold uppercase tracking-wide text-slate-500`; cards
-are `rounded-lg border border-slate-200 bg-white p-4`.
+Rules:
 
-## The controller-prop pattern
+- **Never a raw palette class** (`bg-white`, `text-slate-500`, `bg-red-50`…). The one exception is
+  the QR code, which must stay black on white to scan.
+- **Green means running or done.** It is never a link colour. Text actions use `.link`.
+- **Selection is brightness, not a fill:** `border-line-strong bg-raised text-ink`. A solid white
+  block is reserved for the single primary action.
+- Shadows do not read on black: cards use `shadow-card` (a 1px top highlight); popovers `shadow-pop`.
 
-The `project/*` cards (`EnvironmentCard`, `StoriesCard`, `ProjectHeader`, `QuestionsCard`,
-`GeneratedFilesCard`) take a single prop `c` — a plain object carrying the fields named in
-each component's `.d.ts`. Pass data + no-op handlers; there is no context to wire:
+## Type
 
-```jsx
-<StoriesCard c={{
-  project: { localPath: '/ws/billing', basePort: 4101, status: 'running',
-             repos: [{ url: 'https://github.com/acme/billing', dir: '/ws/billing' }] },
-  stories: [{ id: 's1', code: 'ACME-12', title: 'Export aging report', status: 'ready' }],
-  targetRepoDir: '/ws/billing', storiesError: null, loadingStories: false,
-  tenantConnected: true, busy: false, lastShipPrUrl: null,
-  implement: async () => {}, refreshStories: async () => {},
-  setTargetRepoDir: () => {}, openExternal: () => {},
-}} />
-```
+Geist (sans) and Geist Mono, self-hosted through `@fontsource-variable` — the app runs offline, so
+no font CDN. Body is 13px. Headings use `tracking-heading`; display type `tracking-display`.
+Mono is for things a person might copy: paths, ports, model names, ids, timers.
 
-`LogPanel`, `ProjectList`, `Settings`, `DemoCredentialsCard`, `MobilePreviewCard` take
-conventional named props — see each `.d.ts`.
+`.section-label` is sentence case, 11.5px, medium, `text-muted` — not uppercase, letter-spaced
+labels, which shouted over the content they introduced.
 
-## Where the truth lives
+## Components (src/index.css)
 
-Read `styles.css` → `_ds_bundle.css` for the full class inventory, and each component's
-`.prompt.md` for working example compositions (they are the verified previews).
+| Class | Use |
+|---|---|
+| `.btn-primary` | White fill, black text. One per screen. Disabled is a quiet raised tile, not a grey blob. |
+| `.btn-secondary` | Bordered, for the other actions in a group. |
+| `.btn-ghost` | No border until hovered; toolbars and dense rows. |
+| `.link` | A text action ("View logs", "Refresh"): neutral, underlined. |
+| `.card` | `rounded-xl border-line bg-surface shadow-card`. |
+| `.chip` | A bordered label with an optional icon. |
+| `.kbd` | A key cap. |
+| `.field` | A text input or textarea. |
+
+## Icons
+
+[lucide-react](https://lucide.dev), at 13–15px with `strokeWidth` 1.5–1.8, `aria-hidden` when a
+label sits beside it. Never Unicode glyphs as icons (↗ ↻ ⇅): on Windows they fall back to the
+colour-emoji font and render as blue tiles.
+
+## Shell
+
+`App` → `Sidebar` (projects, each with its live state and any running agent) · `ProjectShell`
+(the tab strip and its panes) · `StatusBar` (the open project, tasks running, version, updates).
+Settings and Add project cover the project at `z-30` — above the tab strip — so no tab reads as
+open on top of them; the project stays mounted underneath so its in-flight work survives.
+
+## Component previews
+
+`entry.ts` exports the presentational surface — components that take props and never call
+`window.mvpfy`: `LogPanel`, `Logo`, `Sidebar`, `StatusBar`, `ConnectFeature1Banner`. Each has a
+preview in `previews/`. The screen views (`OverviewView`, `PlanView`, …) need the project
+controller and IPC, so they are mapped to null.

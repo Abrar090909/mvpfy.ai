@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { extractPrUrl, RunHandle } from './agentRunner';
 import { loadRunHistory, mergeHistory, saveRunHistory } from './runHistory';
 
@@ -8,6 +8,26 @@ import { loadRunHistory, mergeHistory, saveRunHistory } from './runHistory';
  * become six renders.
  */
 const LOG_FLUSH_MS = 100;
+
+/** A set of ids, as the hooks use one to act on each finished run once. */
+export interface HandledSet {
+  has(id: string): boolean;
+  add(id: string): void;
+  delete(id: string): boolean;
+}
+
+/**
+ * A named slice of one shared store, so several "handled" sets can live in
+ * it without their ids colliding.
+ */
+export function scopedSet(store: Set<string>, scope: string): HandledSet {
+  const key = (id: string) => `${scope}\u0000${id}`;
+  return {
+    has: (id) => store.has(key(id)),
+    add: (id) => void store.add(key(id)),
+    delete: (id) => store.delete(key(id)),
+  };
+}
 
 export interface RunState {
   handle: RunHandle;
@@ -34,6 +54,24 @@ export interface RunsApi {
   completed(runId: string): Promise<number | null>;
   stop(runId: string): void;
   latestForProject(projectId: string): RunState | null;
+  /**
+   * Which finished runs have already been acted on, under `scope`.
+   *
+   * Kept here, beside the runs, rather than in each hook: the hooks live in
+   * ProjectShell, which remounts on every project switch, and a fresh set
+   * there sees every run of the session as new — so a finished bootstrap
+   * bootstrapped again, a seed ran twice, a story moved back to Testing.
+   */
+  handled(scope: string): HandledSet;
+}
+
+/**
+ * A HandledSet that outlives the component, for `const seen =
+ * useHandled(runsApi, 'scope')` in place of `useRef(new Set())`.
+ */
+export function useHandled(runsApi: RunsApi, scope: string): { current: HandledSet } {
+  const { handled } = runsApi;
+  return useMemo(() => ({ current: handled(scope) }), [handled, scope]);
 }
 
 /** Tracks streamed output and exit status for every spawned run. */
@@ -189,5 +227,8 @@ export function useRuns(onRunFinished?: (run: RunState) => void): RunsApi {
     [runs]
   );
 
-  return { runs, history, track, fail, completed, stop, latestForProject };
+  const handledStore = useRef(new Set<string>());
+  const handled = useCallback((scope: string) => scopedSet(handledStore.current, scope), []);
+
+  return { runs, history, track, fail, completed, stop, latestForProject, handled };
 }

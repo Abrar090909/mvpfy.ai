@@ -1,3 +1,4 @@
+import { AppWindow, ArrowUpRight } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { AgentKind, ChatTurn, Conversation } from '../../shared/types';
 import { pendingProposal } from '../hooks/useAppChat';
@@ -81,16 +82,19 @@ export default function AppView({ c, onOpenOverview }: Props) {
               </span>
               <button
                 onClick={() => webview.current?.reloadIgnoringCache?.()}
-                className="text-go hover:text-go-hover hover:underline"
+                className="link"
                 title="Force refresh — reloads the app ignoring cached files"
               >
                 Refresh
               </button>
-              <button
-                onClick={() => app.url && c.openExternal(app.url)}
-                className="text-go hover:text-go-hover hover:underline"
-              >
-                Open in browser ↗
+              <button onClick={() => app.url && c.openExternal(app.url)} className="link">
+                Open in browser
+                <ArrowUpRight
+                  size={12}
+                  strokeWidth={1.8}
+                  className="ml-0.5 inline-block align-[-1px]"
+                  aria-hidden
+                />
               </button>
             </>
           )}
@@ -111,6 +115,9 @@ export default function AppView({ c, onOpenOverview }: Props) {
             </div>
           ) : (
             <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+              <span className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-surface text-muted shadow-card">
+                <AppWindow size={20} strokeWidth={1.5} aria-hidden />
+              </span>
               <h2 className="text-[15px] font-semibold">
                 {!app.url
                   ? `${app.name} has no page to show here`
@@ -286,7 +293,7 @@ function Turn({ turn, log }: { turn: ChatTurn; log: string }) {
     const sofar = replySoFar(log);
     return (
       <div className="flex gap-2 text-[13px] leading-relaxed text-body">
-        <span className="dot-pulse mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-brand" />
+        <span className="dot-pulse mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-work" />
         <span className="whitespace-pre-wrap">{sofar ? <Inline text={sofar} /> : 'Thinking…'}</span>
       </div>
     );
@@ -384,7 +391,7 @@ function Composer({
   return (
     <div className="border-t border-line p-3">
       {c.chatError && (
-        <p className="mb-2 rounded-md border border-danger/30 bg-red-50 px-2.5 py-1.5 text-[12px] text-danger">
+        <p className="mb-2 rounded-md border border-danger/30 bg-danger-bg px-2.5 py-1.5 text-[12px] text-danger">
           {c.chatError}
         </p>
       )}

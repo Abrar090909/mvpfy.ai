@@ -1,5 +1,6 @@
 import { prepareFeaturePreview, updateLocalDatabase } from '../lib/prepareFeaturePreview';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { worktreeProjectKey } from '../../shared/slug';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RunSession, configDirFor, planFileFor, specFileFor } from '../../shared/types';
 import {
   startPlanSpecRun,
@@ -49,6 +50,7 @@ import {
 } from '../lib/plan';
 import { ControllerContext, contentOf } from './controllerContext';
 import type { FeatureRepoGit, PullRequestState, StrandedFeature } from '../../shared/types';
+import { useHandled } from '../lib/useRuns';
 
 /** One planned feature: its parsed plan plus the live run state around it. */
 export interface FeaturePlan {
@@ -170,12 +172,25 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
   const trunkBased = isTrunkBased(project);
   const featureLimit = featureLimitFor(trunkBased);
   const specRuns = projectRuns.filter((r) => r.handle.kind === 'plan-spec');
+  // Every plan file parsed once per change of the files, rather than on each
+  // render — which, while a story streams its log, is ten times a second.
+  const planSlugsKey = (project.planSlugs ?? []).join('\u0000');
+  const parsedPlans = useMemo(
+    () =>
+      new Map(
+        ['', ...(planSlugsKey ? planSlugsKey.split('\u0000') : [])].map((slug) => [
+          slug,
+          parsePlan(contentOf(files, pf(planFileFor(slug)))),
+        ])
+      ),
+    [files, pf, planSlugsKey]
+  );
   const plans: FeaturePlan[] = ['', ...(project.planSlugs ?? [])]
     .map((slug): FeaturePlan => {
       const running = storyRuns.filter((r) => r.running && (r.handle.planSlug ?? '') === slug);
       return {
         slug,
-        plan: parsePlan(contentOf(files, pf(planFileFor(slug)))),
+        plan: parsedPlans.get(slug) ?? null,
         specMarkdown: contentOf(files, pf(specFileFor(slug))),
         generating: specRuns.some((r) => r.running && (r.handle.planSlug ?? '') === slug),
         runningStory: running.map((r) => r.handle.storyId ?? null).pop() ?? null,
@@ -205,7 +220,7 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
         !isAmbientRun(r.handle.kind) &&
         !['plan-spec', 'plan-story', 'readiness'].includes(r.handle.kind)
     );
-  const processedPlanRuns = useRef(new Set<string>());
+  const processedPlanRuns = useHandled(runsApi, `${project.id}:plan-to-testing`);
   // The feature being worked through story by story. Session-only on purpose:
   // a run that was interrupted by a quit should not silently resume itself.
   // One per feature, not one for the project. Each feature's stories run in
@@ -274,12 +289,12 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
         ),
       });
     }
-  }, [storyRuns, plans, writePlan]);
+  }, [storyRuns, plans, writePlan, processedPlanRuns]);
 
   // Every pull request the raise printed — a multi-repo feature opens one per
   // repository that changed, so a single URL would lose the rest.
   const prRuns = projectRuns.filter((r) => r.handle.kind === 'raise-pr');
-  const processedPrRuns = useRef(new Set<string>());
+  const processedPrRuns = useHandled(runsApi, `${project.id}:plan-pr`);
   useEffect(() => {
     for (const run of prRuns) {
       // Not `exitCode !== 0`: the repos are chained, so one failing fails the
@@ -592,10 +607,10 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
     | ((code: string, continuing?: boolean, forSlug?: string, reopen?: boolean) => Promise<boolean>)
     | null
   >(null);
-  const processedFailures = useRef(new Set<string>());
+  const processedFailures = useHandled(runsApi, `${project.id}:plan-failure`);
   // One automatic retry per feature, so a conversation that was never there
   // cannot become a loop of runs each opening and failing in turn.
-  const reopened = useRef(new Set<string>());
+  const reopened = useHandled(runsApi, `${project.id}:plan-reopened`);
   useEffect(() => {
     for (const run of failedRuns) {
       if (processedFailures.current.has(run.handle.runId)) continue;
@@ -834,8 +849,7 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
   const [updated, setUpdated] = useState<{ slug: string; at: number } | null>(null);
   const justUpdated = updated !== null && updated.slug === (activePlan?.slug ?? '');
 
-  const projectKey = () =>
-    `${project.localPath.split(/[/\\]/).pop() ?? 'project'}-${project.id.slice(0, 6)}`;
+  const projectKey = () => worktreeProjectKey(project.localPath, project.id);
 
   /**
    * Put the workspace back on the feature it is testing, after its branch has
@@ -1077,7 +1091,7 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
         throw new Error('Something is still running for this feature — stop it first.');
       }
       const dirs = project.repos.map((r) => r.dir);
-      const projectKey = `${project.localPath.split(/[/\\]/).pop() ?? 'project'}-${project.id.slice(0, 6)}`;
+      const projectKey = worktreeProjectKey(project.localPath, project.id);
       // Put the workspace back on its trunk first: the checkout is detached at
       // a commit of this feature, and removing the board while the app is
       // running its code leaves somebody testing a feature that is gone.
@@ -1514,7 +1528,7 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
    * away. Said once per run, and only while mvpfy is not the window they are
    * looking at; the main process decides that, because only it can know.
    */
-  const announced = useRef(new Set<string>());
+  const announced = useHandled(runsApi, `${project.id}:plan-announced`);
   const [quotaWait, setQuotaWait] = useState<{
     slug: string;
     story: string | null;
@@ -1599,25 +1613,34 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
    * half-implemented until somebody opened the app and wondered why. Only
    * while mvpfy is open, which is said where it is offered.
    */
+  //
+  // The timer fires up to hours after it was set, so it reads the plans and
+  // implementFeature as they are then, through a ref, rather than the ones
+  // captured when the wait began — those carried that render's project,
+  // settings and files, and resumed the feature against a stale picture.
+  const resumeLatest = useRef({ plans, implementFeature });
+  useEffect(() => {
+    resumeLatest.current = { plans, implementFeature };
+  });
   useEffect(() => {
     if (!quotaWait) return;
     const timer = setTimeout(
       () => {
-        const plan = plans.find((pl) => pl.slug === quotaWait.slug)?.plan;
+        const { plans: now, implementFeature: implement } = resumeLatest.current;
+        const plan = now.find((pl) => pl.slug === quotaWait.slug)?.plan;
         void window.mvpfy.notify(quotaBack(plan?.spec.feature || quotaWait.slug, quotaWait.story));
         setQuotaWait(null);
-        void implementFeature(quotaWait.slug);
+        void implement(quotaWait.slug);
       },
       waitFor(new Date(), quotaWait.at)
     );
     return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quotaWait]);
 
   // Start the next story once the last one has landed in Testing. Waiting for
   // that move rather than for the run to exit keeps two writes to the same
   // plan file from racing each other.
-  const chainedStories = useRef(new Set<string>());
+  const chainedStories = useHandled(runsApi, `${project.id}:plan-chain`);
   useEffect(() => {
     // One chain per feature being worked through. They advance independently:
     // a failure in one stops that feature where it happened and says nothing

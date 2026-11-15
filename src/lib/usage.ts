@@ -33,7 +33,31 @@ const num = (v: unknown): number => {
   return Number.isFinite(n) && n > 0 ? n : 0;
 };
 
+/** Recent answers, by log text. A finished run's log never changes again. */
+const usageCache = new Map<string, RunUsage>();
+const USAGE_CACHE_SIZE = 64;
+
+/**
+ * Token use per turn, read off an agent's stream-json log.
+ *
+ * Remembered by log text: the run picker, the history total and the log
+ * panel each asked again on every render — every 100 ms while anything
+ * streamed — and each time split and JSON-parsed every line of up to forty
+ * logs. A finished log is the same string every time, so the answer is too.
+ */
 export function parseUsage(log: string | null | undefined): RunUsage {
+  const key = log ?? '';
+  const hit = usageCache.get(key);
+  if (hit) return hit;
+  const parsed = parseUsageUncached(key);
+  if (usageCache.size >= USAGE_CACHE_SIZE) {
+    usageCache.delete(usageCache.keys().next().value as string);
+  }
+  usageCache.set(key, parsed);
+  return parsed;
+}
+
+function parseUsageUncached(log: string | null | undefined): RunUsage {
   const turns: TurnUsage[] = [];
 
   for (const line of (log ?? '').split('\n')) {
