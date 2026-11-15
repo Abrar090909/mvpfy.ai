@@ -5,22 +5,30 @@
 # Run:    see docs/worker-docker.md — it has the full invocation and says
 #         what each mount and variable is for.
 
-FROM node:22-bookworm-slim AS build
+# Pinned by digest so a rebuild is the same image, not whatever the tag points
+# at that day. Bump it deliberately (docker buildx imagetools inspect
+# node:22-bookworm-slim) to pick up base-image security fixes.
+ARG NODE_IMAGE=node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
+
+FROM ${NODE_IMAGE} AS build
 WORKDIR /build
 # Dependencies first, so a source change does not re-resolve them.
 COPY package.json package-lock.json ./
-RUN npm ci
+# --ignore-scripts: the worker needs only the TypeScript compiler from these,
+# and the desktop app's dependencies include Electron, whose postinstall would
+# otherwise download a whole browser into a stage that never runs it.
+RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY tsconfig.worker.json ./
 COPY shared ./shared
 COPY worker ./worker
 RUN npx tsc -p tsconfig.worker.json
 
-FROM node:22-bookworm-slim
+FROM ${NODE_IMAGE}
 # git and gh are what the worker shells out to; ca-certificates is what lets
 # it reach GitHub at all. openssh-client only for ssh clone URLs.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl git openssh-client \
+      ca-certificates curl git openssh-client tini \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
@@ -32,8 +40,11 @@ RUN apt-get update \
 
 # Both coding agents, because MVPFY_AGENT selects between them at runtime
 # and an image that carries only one makes the other setting a lie.
-ARG CLAUDE_CODE_VERSION=latest
-ARG CODEX_VERSION=latest
+# Exact versions, not `latest`: Docker caches this layer by its command text,
+# so `latest` froze at whatever was current on the first build and never moved,
+# while looking as if it did. Raise these deliberately (or --build-arg them).
+ARG CLAUDE_CODE_VERSION=2.1.325
+ARG CODEX_VERSION=0.169.0
 RUN npm install -g \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       @openai/codex@${CODEX_VERSION} \
@@ -66,4 +77,7 @@ ENV MVPFY_WORKER_ROOT=/var/lib/mvpfy \
 # Draining takes as long as the execution in flight, so the signal has to
 # reach node rather than a shell that would ignore it.
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["node", "dist-worker/worker/index.js"]
+# tini as PID 1: it forwards SIGTERM to node and reaps the orphans that agents
+# and test suites leave behind, which node as PID 1 never does, so they piled
+# up as zombies for the life of the container.
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "dist-worker/worker/index.js"]

@@ -27,6 +27,7 @@ tmpfs for `/tmp`, claims against the fake, and drains on `SIGTERM`.
 docker run -d --name mvpfy-worker \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+  --tmpfs /home/mvpfy:rw,nosuid,uid=10001,gid=10001,size=256m \
   -v mvpfy-work:/var/lib/mvpfy \
   -e MVPFY_FEATURE1_URL=https://acme.feature1.ai \
   -e MVPFY_RUNNER_TOKEN=<64 hex, from an organisation admin> \
@@ -80,7 +81,7 @@ reported.
   request.
 - **Nothing else.** The worker never touches a developer's working copy. Every
   checkout is made by the worker, under
-  `/var/lib/mvpfy/executions/<tenantId>/<executionId>/<repositoryId>/`, keyed by
+  `/var/lib/mvpfy/executions/<tenantId>/<executionId>/repos/<repositoryId>/`, keyed by
   stable ids rather than names — two repositories in one assignment may both be
   called `api`.
 - **Not the host Docker socket.** Mounting it would hand the agent control of

@@ -47,6 +47,9 @@ export async function mcpFetch(req: McpFetchRequest): Promise<McpFetchResponse> 
       method: req.method || 'GET',
       headers: req.headers,
       body: req.body,
+      // Through the body as well as the headers: a server that answers and
+      // then stalls left this — and whatever was waiting on it — hanging.
+      signal: AbortSignal.timeout(60_000),
     });
     const body = await res.text();
     return { ok: res.ok, status: res.status, body };

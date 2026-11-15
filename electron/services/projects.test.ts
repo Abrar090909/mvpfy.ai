@@ -8,6 +8,7 @@ import {
   addRemoteCommand,
   addRepositories,
   discoverRepositories,
+  chainPerRepo,
   checkoutDefaultCommand,
   commitFeatureWorkCommand,
   deleteFeatureFiles,
@@ -22,6 +23,9 @@ import {
   featureCheckedOut,
   mergeTrunkCommand,
   raisePrCommand,
+  removeProjectWorktrees,
+  readRepoFiles,
+  writeRepoFile,
   workspaceIsEmpty,
   repoSyncCommand,
   worktreeAddCommand,
@@ -31,6 +35,13 @@ import {
 import { IS_WIN, shellQuote, spawnShellSync } from './shell';
 
 afterEach(() => setLinkedRoots([]));
+
+// The repositories these tests make compare file contents byte for byte, and a
+// Windows git with core.autocrlf on rewrites them to CRLF on checkout. Off for
+// every git this process starts — the tests, and the commands under test.
+process.env.GIT_CONFIG_COUNT = '1';
+process.env.GIT_CONFIG_KEY_0 = 'core.autocrlf';
+process.env.GIT_CONFIG_VALUE_0 = 'false';
 
 describe('repoSyncCommand', () => {
   it('builds one pull per managed repo dir, joined with &&', () => {
@@ -55,7 +66,9 @@ describe('repoSyncCommand', () => {
   it('accepts dirs under a registered linked root', () => {
     setLinkedRoots(['/Users/pm/code/shop']);
     const dir = '/Users/pm/code/shop/api';
-    expect(repoSyncCommand([dir])).toContain(`git -C ${shellQuote(dir)} pull --ff-only`);
+    expect(repoSyncCommand([dir])).toContain(
+      `git -C ${shellQuote(path.resolve(dir))} pull --ff-only`
+    );
   });
 
   it('rejects any dir outside managed and linked workspaces', () => {
@@ -162,6 +175,31 @@ describe('worktree commands', () => {
   it('says so rather than failing when there is nothing to remove', () => {
     const dir = path.join(PROJECTS_DIR, 'shop', 'api');
     expect(worktreeRemoveCommand('k', 'f', [dir])).toContain('Nothing to remove');
+  });
+
+  it('removes a deleted project’s checkouts, and git forgets them', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'mvpfy-wt-'));
+    const key = `wt-test-${process.pid}-${Date.now()}`;
+    const tree = worktreePathFor(key, 'paging', repo);
+    const git = (args: string[], cwd: string) =>
+      execFileSync('git', args, { cwd, stdio: 'pipe' }).toString();
+    try {
+      git(['init', '-q', '-b', 'main'], repo);
+      git(
+        ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'x'],
+        repo
+      );
+      git(['worktree', 'add', '-q', '-b', 'mvpfy/paging', tree], repo);
+      expect(fs.existsSync(tree)).toBe(true);
+
+      await removeProjectWorktrees(repo, key);
+
+      expect(fs.existsSync(tree)).toBe(false);
+      expect(git(['worktree', 'list'], repo).trim().split('\n')).toHaveLength(1);
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(path.dirname(path.dirname(tree)), { recursive: true, force: true });
+    }
   });
 });
 
@@ -376,9 +414,9 @@ describe('isRemoteUrl', () => {
 describe('commitFeatureWorkCommand', () => {
   it('refuses a directory outside a managed or linked workspace', () => {
     setLinkedRoots([]);
-    expect(() => commitFeatureWorkCommand(['/etc'], 'k', 'paging', 'mvpfy/paging', 'msg')).toThrow(
-      /restricted to managed and linked/
-    );
+    expect(() =>
+      commitFeatureWorkCommand(['/etc'], 'k', 'paging', 'mvpfy/paging', '/tmp/msg')
+    ).toThrow(/restricted to managed and linked/);
   });
 
   it('says there is nothing to commit in rather than producing an empty command', () => {
@@ -386,15 +424,15 @@ describe('commitFeatureWorkCommand', () => {
     // would "succeed" and leave the builder believing work had been committed.
     const dir = path.join(PROJECTS_DIR, 'shop', 'api');
     expect(() =>
-      commitFeatureWorkCommand([dir], 'shop-a1b2c3', 'paging', 'mvpfy/paging', 'msg')
+      commitFeatureWorkCommand([dir], 'shop-a1b2c3', 'paging', 'mvpfy/paging', '/tmp/msg')
     ).toThrow(/implement something first/i);
   });
 });
 
 describe('featureGitStatus', () => {
-  it('reports a repository it is not allowed to read as absent, not as clean', () => {
+  it('reports a repository it is not allowed to read as absent, not as clean', async () => {
     setLinkedRoots([]);
-    expect(featureGitStatus(['/etc'], 'k', 'paging', 'mvpfy/paging')).toEqual([]);
+    expect(await featureGitStatus(['/etc'], 'k', 'paging', 'mvpfy/paging')).toEqual([]);
   });
 });
 
@@ -474,6 +512,102 @@ describe('deleteFeatureFiles', () => {
   it('says nothing was there rather than failing on a feature already gone', () => {
     expect(deleteFeatureFiles(workspace(), '', 'paging').removed).toEqual([]);
   });
+
+  it('never removes anything outside the workspace, whatever it is handed', () => {
+    // A configDir or slug that climbs out used to pass the containment check,
+    // because the check was built from the same climbing value — before rm.
+    const ws = workspace();
+    const outside = path.join(path.dirname(ws), `${path.basename(ws)}-victim`);
+    fs.mkdirSync(path.join(outside, 'mvpfy-design', 'paging'), { recursive: true });
+    try {
+      const up = `../${path.basename(outside)}/`;
+      expect(() => deleteFeatureFiles(ws, up, 'paging')).toThrow(/config folder/);
+      expect(() => deleteFeatureFiles(ws, '', `../../${path.basename(outside)}`)).toThrow(
+        /feature name/
+      );
+      expect(fs.existsSync(path.join(outside, 'mvpfy-design', 'paging'))).toBe(true);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('repo file access from the renderer', () => {
+  const dirs: string[] = [];
+  const tmp = (prefix: string): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    dirs.push(dir);
+    return dir;
+  };
+  const workspace = (): string => {
+    const dir = tmp('mvpfy-files-');
+    setLinkedRoots([dir]);
+    return dir;
+  };
+  /** Symlinks need Developer Mode or admin on Windows; skip where refused. */
+  const link = (target: string, at: string, skip: () => void): void => {
+    try {
+      fs.symlinkSync(target, at, fs.statSync(target).isDirectory() ? 'junction' : 'file');
+    } catch {
+      skip();
+    }
+  };
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reads and writes files inside the workspace', () => {
+    const ws = workspace();
+    writeRepoFile(ws, 'mvpfy-questions.md', 'Why?');
+    expect(readRepoFiles(ws, ['mvpfy-questions.md', 'missing.md'])).toEqual([
+      { relativePath: 'mvpfy-questions.md', exists: true, content: 'Why?' },
+      { relativePath: 'missing.md', exists: false, content: null },
+    ]);
+  });
+
+  it('refuses a root that is not a managed or linked workspace', () => {
+    const outside = tmp('mvpfy-outside-');
+    setLinkedRoots([]);
+    expect(() => readRepoFiles(outside, ['a.md'])).toThrow(/managed and linked/);
+    expect(() => writeRepoFile(outside, 'a.md', 'x')).toThrow(/managed and linked/);
+  });
+
+  it('refuses paths that climb out of the workspace', () => {
+    const ws = workspace();
+    expect(readRepoFiles(ws, ['../escape.md'])[0].exists).toBe(false);
+    expect(() => writeRepoFile(ws, '../escape.md', 'x')).toThrow(/outside the repo/);
+  });
+
+  it('does not read through a symlink that points outside', ({ skip }) => {
+    const outside = tmp('mvpfy-outside-');
+    fs.writeFileSync(path.join(outside, 'secret'), 'private key');
+    const ws = workspace();
+    link(path.join(outside, 'secret'), path.join(ws, 'mvpfy-questions.md'), skip);
+    expect(readRepoFiles(ws, ['mvpfy-questions.md'])[0]).toEqual({
+      relativePath: 'mvpfy-questions.md',
+      exists: false,
+      content: null,
+    });
+  });
+
+  it('does not write through a symlinked file', ({ skip }) => {
+    const outside = tmp('mvpfy-outside-');
+    const rc = path.join(outside, '.zshrc');
+    fs.writeFileSync(rc, 'export PATH=…');
+    const ws = workspace();
+    link(rc, path.join(ws, 'mvpfy-questions.md'), skip);
+    expect(() => writeRepoFile(ws, 'mvpfy-questions.md', '')).toThrow(/symlink/);
+    expect(fs.readFileSync(rc, 'utf8')).toBe('export PATH=…');
+  });
+
+  it('does not write into a symlinked directory that points outside', ({ skip }) => {
+    const outside = tmp('mvpfy-outside-');
+    const ws = workspace();
+    link(outside, path.join(ws, '.mvpfy'), skip);
+    expect(() => writeRepoFile(ws, '.mvpfy/answers.md', 'x')).toThrow(/outside the repo/);
+    expect(fs.existsSync(path.join(outside, 'answers.md'))).toBe(false);
+  });
 });
 
 /**
@@ -524,7 +658,7 @@ describe('updating a feature from the trunk', () => {
     for (const dir of made.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('brings in what landed on the trunk after the feature branched', () => {
+  it('brings in what landed on the trunk after the feature branched', async () => {
     const { dir, origin } = work();
     setLinkedRoots([dir]);
     const key = `test-${path.basename(dir)}`;
@@ -538,13 +672,13 @@ describe('updating a feature from the trunk', () => {
     expect(spawnShellSync(cmd, { encoding: 'utf8', timeout: 60_000 }).status).toBe(0);
 
     expect(fs.existsSync(path.join(tree, 'pricing.ts'))).toBe(true);
-    const [row] = featureGitStatus([dir], key, 'paging', 'mvpfy/paging');
+    const [row] = await featureGitStatus([dir], key, 'paging', 'mvpfy/paging');
     expect(row.behind).toBe(0);
     expect(row.trunk).toBe('origin/main');
     expect(row.mergeInProgress).toBe(false);
   }, 60_000);
 
-  it('counts how far behind the trunk the feature has fallen', () => {
+  it('counts how far behind the trunk the feature has fallen', async () => {
     const { dir, origin } = work();
     setLinkedRoots([dir]);
     const key = `test-${path.basename(dir)}`;
@@ -555,12 +689,12 @@ describe('updating a feature from the trunk', () => {
     // pushed — so it has to be fetched to be seen.
     git(dir, 'fetch', 'origin', 'main');
 
-    const [row] = featureGitStatus([dir], key, 'paging', 'mvpfy/paging');
+    const [row] = await featureGitStatus([dir], key, 'paging', 'mvpfy/paging');
     expect(row.behind).toBe(2);
     expect(row.ahead).toBe(0);
   }, 60_000);
 
-  it('leaves the checkout as it was when the trunk conflicts with the feature', () => {
+  it('leaves the checkout as it was when the trunk conflicts with the feature', async () => {
     const { dir, origin } = work();
     setLinkedRoots([dir]);
     const key = `test-${path.basename(dir)}`;
@@ -580,7 +714,7 @@ describe('updating a feature from the trunk', () => {
     expect(`${res.stdout}${res.stderr}`).toContain('could not merge');
     // Half-merged is worse than not merged: every later run in the checkout
     // would fail on the merge instead of on what it was asked to do.
-    const [row] = featureGitStatus([dir], key, 'paging', 'mvpfy/paging');
+    const [row] = await featureGitStatus([dir], key, 'paging', 'mvpfy/paging');
     expect(row.mergeInProgress).toBe(false);
     expect(fs.readFileSync(path.join(tree, 'index.ts'), 'utf8')).toBe('feature\n');
   }, 60_000);
@@ -643,7 +777,7 @@ describe('updating a feature from the trunk', () => {
     expect(fs.readFileSync(path.join(tree, 'index.ts'), 'utf8')).toBe('feature\n');
   }, 60_000);
 
-  it('commits the resolution on the feature branch and leaves the trunk untouched', () => {
+  it('commits the resolution on the feature branch and leaves the trunk untouched', async () => {
     const { dir, origin, key, tree } = conflicted();
     const trunkWas = rev(dir, 'origin/main');
     const mainWas = rev(dir, 'main');
@@ -669,7 +803,7 @@ describe('updating a feature from the trunk', () => {
     expect(rev(dir, 'main')).toBe(mainWas);
     expect(rev(origin, 'main')).toBe(originWas);
 
-    const [row] = featureGitStatus([dir], key, 'paging', 'mvpfy/paging');
+    const [row] = await featureGitStatus([dir], key, 'paging', 'mvpfy/paging');
     expect(row.behind).toBe(0);
     expect(row.mergeInProgress).toBe(false);
     // The feature's own work is still ahead of the trunk, not swallowed by it.
@@ -723,7 +857,7 @@ describe('updating a feature from the trunk', () => {
       /restricted to managed and linked/
     );
   });
-  it("pushes a trunk-based project's commits on top of what landed meanwhile", () => {
+  it("pushes a trunk-based project's commits on top of what landed meanwhile", async () => {
     // On a shared trunk somebody has usually pushed since; a plain push would
     // simply be refused.
     const { dir, origin } = work();
@@ -733,7 +867,7 @@ describe('updating a feature from the trunk', () => {
     git(dir, 'commit', '-m', 'US-01: paging');
     landOnTrunk(origin, 'pricing.ts', 'landed\n');
 
-    const [before] = featureGitStatus([dir], 'unused', 'paging', '');
+    const [before] = await featureGitStatus([dir], 'unused', 'paging', '');
     expect(before.unpushed).toBe(1);
 
     const cmd = pushTrunkCommand([dir]);
@@ -802,7 +936,7 @@ describe('updating a feature from the trunk', () => {
     expect(cmd).toContain('would not take this push');
   }, 120_000);
 
-  it('merges every other repository when one of them conflicts', () => {
+  it('merges every other repository when one of them conflicts', async () => {
     const a = work();
     const b = work();
     setLinkedRoots([a.dir, b.dir]);
@@ -823,7 +957,7 @@ describe('updating a feature from the trunk', () => {
     // it is up to date rather than untouched.
     expect(featureConflicts([a.dir, b.dir], key, 'paging').map((c) => c.repo)).toEqual([a.dir]);
     expect(fs.existsSync(path.join(treeB, 'pricing.ts'))).toBe(true);
-    const [, rowB] = featureGitStatus([a.dir, b.dir], key, 'paging', 'mvpfy/paging');
+    const [, rowB] = await featureGitStatus([a.dir, b.dir], key, 'paging', 'mvpfy/paging');
     expect(rowB.behind).toBe(0);
   }, 120_000);
 });
@@ -1027,10 +1161,10 @@ describe('going back to the trunk', () => {
       setLinkedRoots([api, web]);
 
       const command = checkoutDefaultCommand([api, web]);
-      expect(command).toContain(`checkout 'main'`);
-      expect(command).toContain(`checkout 'master'`);
+      expect(command).toContain(`checkout ${shellQuote('main')}`);
+      expect(command).toContain(`checkout ${shellQuote('master')}`);
 
-      execFileSync('/bin/sh', ['-c', command], { stdio: 'pipe' });
+      expect(spawnShellSync(command, { encoding: 'utf8', timeout: 30_000 }).status).toBe(0);
       expect(git(['rev-parse', '--abbrev-ref', 'HEAD'], api)).toBe('main');
       expect(git(['rev-parse', '--abbrev-ref', 'HEAD'], web)).toBe('master');
     } finally {
@@ -1047,9 +1181,28 @@ describe('going back to the trunk', () => {
       fs.mkdirSync(dir, { recursive: true });
       git(['init', '-q', '-b', 'main'], dir);
       setLinkedRoots([dir]);
-      expect(checkoutDefaultCommand([dir])).toContain(`checkout 'main'`);
+      expect(checkoutDefaultCommand([dir])).toContain(`checkout ${shellQuote('main')}`);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe('chainPerRepo, run by the real shell', () => {
+  it('runs every repository, whichever of them succeed or fail', () => {
+    // cmd.exe gives `||` lower precedence than `&&`; written the POSIX way,
+    // the first repository succeeding skipped every one after it.
+    const fail = IS_WIN ? 'cmd /c exit 1' : 'false';
+    const cmd = chainPerRepo([
+      { name: 'api', command: 'echo api-done', whenItFails: 'api failed' },
+      { name: 'web', command: fail, whenItFails: 'web failed' },
+      { name: 'admin', command: 'echo admin-done', whenItFails: 'admin failed' },
+    ]);
+    const res = spawnShellSync(cmd, { encoding: 'utf8', timeout: 30_000 });
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain('api-done');
+    expect(res.stdout).toContain('web failed');
+    expect(res.stdout).toContain('admin-done');
+    expect(res.stdout).not.toContain('api failed');
   });
 });

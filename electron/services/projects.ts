@@ -1,12 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-  CreateProjectResult,
-  MergeConflicts,
-  RepoCloneOutcome,
-  RepoFile,
-} from '../../shared/types';
+import { CreateProjectResult, MergeConflicts, RepoCloneOutcome } from '../../shared/types';
 import {
   BlankProjectRemote,
   designDirFor,
@@ -16,6 +11,8 @@ import {
 } from '../../shared/types';
 import { slugFromRepoUrl } from '../../shared/slug';
 import {
+  approveLinkedRoot,
+  assertFeatureLocation,
   ensureDirs,
   isAllowedWorkspace,
   isLinkedPath,
@@ -24,14 +21,30 @@ import {
   PROJECTS_DIR,
   WORKTREES_DIR,
 } from '../paths';
-import { ideContainerName, spawnEnv } from './docker';
-import { cdTo, IS_WIN, shellQuote, spawnShell, spawnShellSync } from './shell';
+import { ideContainerName, legacyIdeContainerName, spawnEnv } from './docker';
+import { cdTo, IS_WIN, shellQuote, spawnShell, spawnShellAsync, spawnShellSync } from './shell';
+
+import {
+  commitsAhead,
+  commitsAheadAsync,
+  commitsBehindAsync,
+  defaultBranchOf,
+  defaultBranchOfAsync,
+  hasBranch,
+  hasBranchAsync,
+  hasOrigin,
+  trunkRefFor,
+  trunkRefForAsync,
+} from './gitInspect';
+
+// Split out of this file; re-exported so every existing import still works.
+export { readRepoFiles, writeRepoFile } from './repoFiles';
 
 /** Project workspace lifecycle: create (clone), read/write files, delete. */
 
 function gitClone(repoUrl: string, dest: string): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
-    const child = spawnShell(`git clone ${shellQuote(repoUrl)} ${shellQuote(dest)}`, {
+    const child = spawnShell(`git clone -- ${shellQuote(repoUrl)} ${shellQuote(dest)}`, {
       cwd: PROJECTS_DIR,
     });
     let stderr = '';
@@ -496,6 +509,9 @@ export function linkProject(sourcePath: string): CreateProjectResult {
     }
   }
   for (const r of repos) ensureInitialCommit(r.dir);
+  // The one place a linked folder becomes one: the state the renderer saves
+  // next may name it, and writeState refuses any linked folder not approved.
+  approveLinkedRoot(src);
   return { ok: true, slug: path.basename(src), workspacePath: src, repos };
 }
 
@@ -514,56 +530,68 @@ export function linkProject(sourcePath: string): CreateProjectResult {
  * for a merge that was interrupted: the next story run fails on it, with an
  * error about the merge rather than about anything the story did.
  */
-export function featureGitStatus(
+export async function featureGitStatus(
   dirs: string[],
   projectKey: string,
   featureSlug: string,
   branch: string
-): FeatureRepoGit[] {
-  const out: FeatureRepoGit[] = [];
-  for (const d of dirs) {
-    const dir = path.resolve(d);
-    if (!isAllowedWorkspace(dir)) continue;
-    const tree = worktreePathFor(projectKey, featureSlug, dir);
-    const has = fs.existsSync(tree);
-    const q = shellQuote(has ? tree : dir);
-    const ask = (command: string) =>
-      spawnShellSync(`git -C ${q} ${command}`, { encoding: 'utf8', timeout: 15_000 });
+): Promise<FeatureRepoGit[]> {
+  // Every repository at once, and within one, every question that does not
+  // depend on another. This was some eight spawnSync calls per repository in a
+  // row, on the main process, every time the plan view asked.
+  const rows = await Promise.all(
+    dirs.map(async (d): Promise<FeatureRepoGit | null> => {
+      const dir = path.resolve(d);
+      if (!isAllowedWorkspace(dir)) return null;
+      const tree = worktreePathFor(projectKey, featureSlug, dir);
+      const has = fs.existsSync(tree);
+      const q = shellQuote(has ? tree : dir);
+      const ask = (command: string) =>
+        spawnShellAsync(`git -C ${q} ${command}`, { timeout: 15_000 });
 
-    const status = has ? ask('status --porcelain') : null;
-    const uncommitted =
-      status?.status === 0
-        ? status.stdout
-            .split('\n')
-            .map((l) => l.trim())
-            .filter(Boolean)
-        : [];
-    const base = defaultBranchOf(dir);
-    // No branch named: a trunk-based project, whose work is the trunk itself,
-    // so what matters is how much of it has not reached the remote yet.
-    const ref = branch || base;
-    const onBranch = hasBranch(dir, ref);
-    const trunk = trunkRefFor(dir, base);
-    const ahead = onBranch ? commitsAhead(dir, base, ref) : 0;
-    const behind = onBranch ? commitsBehind(dir, ref, trunk) : 0;
-    // -1 rather than 0: a branch that was never pushed is a different answer
-    // from one whose commits are all on the remote already.
-    const pushedRange = ask(`rev-list --count ${shellQuote(`origin/${ref}..${ref}`)}`);
-    const unpushed = pushedRange.status === 0 ? Number(pushedRange.stdout.trim()) || 0 : -1;
-    const merge = has ? ask('rev-parse -q --verify MERGE_HEAD') : null;
+      const [status, base, merge] = await Promise.all([
+        has ? ask('status --porcelain') : null,
+        defaultBranchOfAsync(dir),
+        has ? ask('rev-parse -q --verify MERGE_HEAD') : null,
+      ]);
+      const uncommitted =
+        status?.status === 0
+          ? status.stdout
+              .split('\n')
+              .map((l) => l.trim())
+              .filter(Boolean)
+          : [];
+      // No branch named: a trunk-based project, whose work is the trunk itself,
+      // so what matters is how much of it has not reached the remote yet.
+      const ref = branch || base;
+      const [onBranch, trunk, pushedRange] = await Promise.all([
+        hasBranchAsync(dir, ref),
+        trunkRefForAsync(dir, base),
+        // -1 rather than 0: a branch that was never pushed is a different
+        // answer from one whose commits are all on the remote already.
+        ask(`rev-list --count ${shellQuote(`origin/${ref}..${ref}`)}`),
+      ]);
+      const [ahead, behind] = onBranch
+        ? await Promise.all([
+            commitsAheadAsync(dir, base, ref),
+            commitsBehindAsync(dir, ref, trunk),
+          ])
+        : [0, 0];
+      const unpushed = pushedRange.status === 0 ? Number(pushedRange.stdout.trim()) || 0 : -1;
 
-    out.push({
-      repo: dir,
-      worktree: has ? tree : '',
-      uncommitted,
-      ahead: ahead < 0 ? 0 : ahead,
-      behind,
-      trunk,
-      unpushed,
-      mergeInProgress: merge?.status === 0,
-    });
-  }
-  return out;
+      return {
+        repo: dir,
+        worktree: has ? tree : '',
+        uncommitted,
+        ahead: ahead < 0 ? 0 : ahead,
+        behind,
+        trunk,
+        unpushed,
+        mergeInProgress: merge?.status === 0,
+      };
+    })
+  );
+  return rows.filter((row): row is FeatureRepoGit => row !== null);
 }
 
 /**
@@ -580,7 +608,13 @@ export function commitFeatureWorkCommand(
   projectKey: string,
   featureSlug: string,
   branch: string,
-  message: string
+  /**
+   * A file holding the message, not the text: the message comes from the
+   * agent-written plan, and on cmd.exe a `%VAR%` inside it expands even in
+   * quotes and a newline ends the command. `commit -F` keeps it off the
+   * command line, as `--body-file` does for a pull request.
+   */
+  messageFile: string
 ): string {
   const parts: string[] = [];
   for (const d of dirs) {
@@ -596,7 +630,7 @@ export function commitFeatureWorkCommand(
         // Nothing to commit is success: the other repositories still have work.
         `(git -C ${q} diff --quiet && git -C ${q} diff --cached --quiet && ` +
         `echo ${shellQuote('nothing uncommitted')} || ` +
-        `(git -C ${q} add -A && git -C ${q} commit -m ${shellQuote(message)}))`
+        `(git -C ${q} add -A && git -C ${q} commit -F ${shellQuote(messageFile)}))`
     );
   }
   if (parts.length === 0) {
@@ -904,7 +938,12 @@ export function pushTrunkCommand(dirs: string[]): string {
       name: path.basename(dir),
       command:
         `(git -C ${q} pull --rebase --autostash origin ${b} || ` +
-        `(git -C ${q} rebase --abort >/dev/null 2>&1; exit 1)) && ` +
+        // Abandon the rebase, then fail this step — in each shell's own words:
+        // cmd.exe has no /dev/null and no `;`, and a bare `exit` there would end
+        // the whole run rather than this step, leaving the rebase open.
+        (IS_WIN
+          ? `(git -C ${q} rebase --abort >NUL 2>&1 & cmd /c exit 1)) && `
+          : `(git -C ${q} rebase --abort >/dev/null 2>&1; exit 1)) && `) +
         `git -C ${q} push origin ${b}`,
       whenItFails: `${base} on the remote would not take these commits — git says why above. They are still committed here, nothing was lost, and every other repository was still pushed`,
     });
@@ -1062,56 +1101,6 @@ export function worktreeRemoveCommand(
 }
 
 /**
- * The branch a repository treats as its trunk. Read from origin/HEAD, which is
- * what the remote itself says; `main` only as a last resort.
- */
-function defaultBranchOf(dir: string): string {
-  const res = spawnShellSync(`git -C ${shellQuote(dir)} rev-parse --abbrev-ref origin/HEAD`, {
-    encoding: 'utf8',
-    timeout: 10_000,
-  });
-  const name = res.status === 0 ? res.stdout.trim().replace(/^origin\//, '') : '';
-  return name || 'main';
-}
-
-/** True when this repository has the branch at all. */
-function hasBranch(dir: string, branch: string): boolean {
-  return (
-    spawnShellSync(`git -C ${shellQuote(dir)} rev-parse --verify ${shellQuote(branch)}`, {
-      encoding: 'utf8',
-      timeout: 10_000,
-    }).status === 0
-  );
-}
-
-/**
- * The trunk to measure against and merge: the remote's copy of it when this
- * repository has one fetched, and the local branch when it has not.
- *
- * The local trunk only moves when somebody pulls. A feature can be six commits
- * behind what everyone else has pushed while the local `main` says it is level,
- * and that is the number a PM is asking about.
- */
-function trunkRefFor(dir: string, base: string): string {
-  const res = spawnShellSync(
-    `git -C ${shellQuote(dir)} rev-parse --verify --quiet ${shellQuote(`refs/remotes/origin/${base}`)}`,
-    { encoding: 'utf8', timeout: 10_000 }
-  );
-  return res.status === 0 ? `origin/${base}` : base;
-}
-
-/** Commits `trunk` has that `branch` has not — what a merge would bring in. */
-function commitsBehind(dir: string, branch: string, trunk: string): number {
-  const res = spawnShellSync(
-    `git -C ${shellQuote(dir)} rev-list --count ${shellQuote(`${branch}..${trunk}`)}`,
-    { encoding: 'utf8', timeout: 10_000 }
-  );
-  // Unknown reads as level rather than as behind: offering to merge something
-  // that could not be counted would be a button with nothing behind it.
-  return res.status === 0 ? Number(res.stdout.trim()) || 0 : 0;
-}
-
-/**
  * Join one step per repository so that a repository failing cannot stop the
  * rest of them.
  *
@@ -1125,48 +1114,22 @@ function commitsBehind(dir: string, branch: string, trunk: string): number {
  * everything that reads these results reads git afterwards rather than an exit
  * code: with several repositories there is no single answer for one to carry.
  */
-function chainPerRepo(
+export function chainPerRepo(
   steps: Array<{ name: string; command: string; whenItFails: string }>
 ): string {
   if (steps.length === 0) return '';
+  // Each step's `||` is closed inside its own parentheses. cmd.exe gives `||`
+  // lower precedence than `&&`, so `(a) || echo x && (b)` is `(a) || (echo x
+  // && (b))` there: when the first repository succeeded, every repository
+  // after it was skipped — sync, push, merge and commit all acted on one.
   return steps
     .map(
       (s) =>
-        `(echo ${shellQuote(`── ${s.name}`)} && (${s.command})) || echo ${shellQuote(
+        `((echo ${shellQuote(`── ${s.name}`)} && (${s.command})) || echo ${shellQuote(
           `${s.name}: ${s.whenItFails}`
-        )}`
+        )})`
     )
     .join(' && ');
-}
-
-/** True when this repository has somewhere to fetch from. */
-function hasOrigin(dir: string): boolean {
-  return (
-    spawnShellSync(`git -C ${shellQuote(dir)} remote get-url origin`, {
-      encoding: 'utf8',
-      timeout: 10_000,
-    }).status === 0
-  );
-}
-
-/** Commits `branch` has that `base` does not, or -1 when the range is unknown. */
-function commitsAhead(dir: string, base: string, branch: string): number {
-  const count = (range: string) =>
-    spawnShellSync(`git -C ${shellQuote(dir)} rev-list --count ${shellQuote(range)}`, {
-      encoding: 'utf8',
-      timeout: 10_000,
-    });
-  // Prefer the remote's copy of the trunk; fall back to the local one, which is
-  // all there is on a repository that has never been pushed.
-  for (const range of [`origin/${base}..${branch}`, `${base}..${branch}`]) {
-    const res = count(range);
-    if (res.status === 0) return Number(res.stdout.trim()) || 0;
-  }
-  // Neither range resolved, so the question is unanswered rather than answered
-  // no. Say "unknown" and let the caller try anyway: excluding a repository on
-  // a failed git command is how a pull request silently never gets raised, and
-  // GitHub refusing it says far more than mvpfy quietly deciding not to ask.
-  return -1;
 }
 
 /**
@@ -1397,6 +1360,7 @@ export function deleteFeatureFiles(
     throw new Error('Features can only be removed from managed and linked project directories');
   }
   if (!slug.trim()) throw new Error('Refusing to remove the unnamed plan');
+  assertFeatureLocation(configDir, slug);
   const removed: string[] = [];
   const targets = [
     path.join(root, configDir, planFileFor(slug)),
@@ -1406,7 +1370,7 @@ export function deleteFeatureFiles(
   for (const target of targets) {
     // Every path is built from a slug that named a plan file; asserted anyway
     // because these reach rm.
-    if (!target.startsWith(path.join(root, configDir))) {
+    if (!target.startsWith(path.join(root, configDir, path.sep))) {
       throw new Error('Refusing to remove outside the workspace');
     }
     if (!fs.existsSync(target)) continue;
@@ -1417,47 +1381,22 @@ export function deleteFeatureFiles(
 }
 
 /** Current branch per repo dir (empty string when not resolvable). */
-export function readRepoBranches(dirs: string[]): Record<string, string> {
+export async function readRepoBranches(dirs: string[]): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
-  for (const dir of dirs) {
-    const resolved = path.resolve(dir);
-    if (!isAllowedWorkspace(resolved)) {
-      out[dir] = '';
-      continue;
-    }
-    const res = spawnShellSync(`git -C ${shellQuote(resolved)} branch --show-current`, {
-      encoding: 'utf8',
-      timeout: 10_000,
-    });
-    out[dir] = res.status === 0 ? res.stdout.trim() : '';
-  }
+  await Promise.all(
+    dirs.map(async (dir) => {
+      const resolved = path.resolve(dir);
+      if (!isAllowedWorkspace(resolved)) {
+        out[dir] = '';
+        return;
+      }
+      const res = await spawnShellAsync(`git -C ${shellQuote(resolved)} branch --show-current`, {
+        timeout: 10_000,
+      });
+      out[dir] = res.status === 0 ? res.stdout.trim() : '';
+    })
+  );
   return out;
-}
-
-export function readRepoFiles(repoPath: string, relativePaths: string[]): RepoFile[] {
-  const root = path.resolve(repoPath);
-  return relativePaths.map((rel) => {
-    const abs = path.resolve(root, rel);
-    // Prevent path traversal outside the repo.
-    if (abs !== root && !abs.startsWith(root + path.sep)) {
-      return { relativePath: rel, exists: false, content: null };
-    }
-    try {
-      const content = fs.readFileSync(abs, 'utf8');
-      return { relativePath: rel, exists: true, content };
-    } catch {
-      return { relativePath: rel, exists: false, content: null };
-    }
-  });
-}
-
-export function writeRepoFile(repoPath: string, relativePath: string, content: string): void {
-  const root = path.resolve(repoPath);
-  const abs = path.resolve(root, relativePath);
-  if (abs !== root && !abs.startsWith(root + path.sep)) {
-    throw new Error('Refusing to write outside the repo');
-  }
-  fs.writeFileSync(abs, content, 'utf8');
 }
 
 /**
@@ -1467,7 +1406,8 @@ export function writeRepoFile(repoPath: string, relativePath: string, content: s
  * generated files are removed, NEVER the folder or anything else in it.
  */
 export async function deleteProject(
-  workspacePath: string
+  workspacePath: string,
+  projectKey?: string
 ): Promise<{ ok: boolean; error?: string }> {
   const resolved = path.resolve(workspacePath);
   const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
@@ -1480,6 +1420,7 @@ export async function deleteProject(
   try {
     // Remove the project's IDE container if one was launched.
     await runToCompletion(`docker rm -f ${ideContainerName(resolved)}`, undefined);
+    await runToCompletion(`docker rm -f ${legacyIdeContainerName(resolved)}`, undefined);
     for (const composeFile of ['docker-compose.mvpfy.yml', '.mvpfy/docker-compose.mvpfy.yml']) {
       if (fs.existsSync(path.join(resolved, composeFile))) {
         await runToCompletion(
@@ -1488,18 +1429,56 @@ export async function deleteProject(
         );
       }
     }
+    // The project's feature checkouts: full copies of every repository, one
+    // per feature, which deleting the project used to leave on disk for good.
+    if (projectKey) await removeProjectWorktrees(resolved, projectKey);
+    // fs.promises, not rmSync: a clone with node_modules is tens of thousands
+    // of files, and removing them synchronously froze the window throughout.
     if (linked) {
       // Linked mode keeps everything mvpfy wrote inside .mvpfy/; the sweep of
       // root-level names is insurance in case an agent ignored that rule.
-      fs.rmSync(path.join(resolved, '.mvpfy'), { recursive: true, force: true });
+      await fs.promises.rm(path.join(resolved, '.mvpfy'), { recursive: true, force: true });
       removeGeneratedFiles(resolved);
     } else {
-      fs.rmSync(resolved, { recursive: true, force: true });
+      await fs.promises.rm(resolved, { recursive: true, force: true });
     }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * A project's feature checkouts, and git's record of them.
+ *
+ * The folder goes first, then `worktree prune` in each repository so git
+ * forgets checkouts that are no longer there. That matters for a linked
+ * folder, which is the user's own repository and outlives the project: left
+ * unpruned, its `.git/worktrees` kept naming paths that did not exist, and
+ * the feature branches stayed locked to them.
+ */
+export async function removeProjectWorktrees(workspace: string, projectKey: string): Promise<void> {
+  const safe =
+    projectKey
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'x';
+  const dir = path.join(WORKTREES_DIR, safe);
+  if (!isWorktreePath(dir)) return;
+  await fs.promises.rm(dir, { recursive: true, force: true });
+  const repos = fs.existsSync(path.join(workspace, '.git'))
+    ? [workspace]
+    : fs.existsSync(workspace)
+      ? fs
+          .readdirSync(workspace, { withFileTypes: true })
+          .filter((e) => e.isDirectory() && fs.existsSync(path.join(workspace, e.name, '.git')))
+          .map((e) => path.join(workspace, e.name))
+      : [];
+  await Promise.all(
+    repos.map((repo) =>
+      spawnShellAsync(`git -C ${shellQuote(repo)} worktree prune`, { timeout: 15_000 })
+    )
+  );
 }
 
 /**

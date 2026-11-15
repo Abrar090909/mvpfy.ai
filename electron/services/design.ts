@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DESIGN_IMAGE_EXTENSIONS, designDirFor } from '../../shared/types';
-import { isAllowedWorkspace } from '../paths';
+import { assertFeatureLocation, isAllowedWorkspace } from '../paths';
 
 /**
  * The pictures of what a feature is supposed to look like.
@@ -27,6 +27,7 @@ function designRoot(workspacePath: string, configDir: string, slug: string): str
   if (!isAllowedWorkspace(resolved)) {
     throw new Error('Designs are restricted to managed and linked project directories');
   }
+  assertFeatureLocation(configDir, slug);
   return path.join(resolved, configDir, designDirFor(slug));
 }
 

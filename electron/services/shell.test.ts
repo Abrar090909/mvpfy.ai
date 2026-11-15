@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   IS_WIN,
+  forgetLoginEnv,
+  mergePosixPath,
+  mergeWindowsPath,
+  resolveUserEnvironment,
   cdTo,
   killProcessTree,
   openTerminalCommand,
@@ -129,19 +133,34 @@ describe('killProcessTree', () => {
     expect(() => killProcessTree({ pid: undefined } as never)).not.toThrow();
   });
 
-  it.runIf(!IS_WIN)('signals the process on posix', () => {
-    const calls: string[] = [];
-    killProcessTree({ pid: 1234, kill: (sig: string) => calls.push(sig) } as never);
-    expect(calls).toEqual(['SIGTERM']);
-  });
-
   it.runIf(!IS_WIN)('really does stop a spawned shell and its child', async () => {
-    // `sleep` is the grandchild; killing only the shell would leave it behind.
     const child = spawnShell('sleep 30', {});
     const exited = new Promise<void>((resolve) => child.on('close', () => resolve()));
     killProcessTree(child);
     await exited;
-    expect(child.killed || child.exitCode !== null || child.signalCode !== null).toBe(true);
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+  });
+
+  it.runIf(!IS_WIN)('stops the grandchildren too, not just the shell', async () => {
+    // A backgrounded `sleep` is a real grandchild — the shape of
+    // `cd x && claude …` or `docker compose up` — which a signal to the shell
+    // alone left running after Stop.
+    const child = spawnShell('sleep 30 & echo $!; wait', {});
+    const grandchild = await new Promise<number>((resolve) =>
+      child.stdout?.once('data', (d: Buffer) => resolve(Number(String(d).trim())))
+    );
+    const exited = new Promise<void>((resolve) => child.on('close', () => resolve()));
+    killProcessTree(child);
+    await exited;
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await expect.poll(() => alive(grandchild), { timeout: 3_000 }).toBe(false);
   });
 });
 
@@ -216,7 +235,8 @@ describe('resolving the profile once instead of per command', () => {
     expect(parseEnvDump('=orphan\0OK=1\0')).toEqual({ OK: '1' });
   });
 
-  it('finds the tools a GUI app would otherwise miss', () => {
+  // The login shell is a POSIX thing; Windows reads PATH from the registry.
+  it.runIf(!IS_WIN)('finds the tools a GUI app would otherwise miss', () => {
     // The whole reason the login shell was there. If this fails, the fix
     // has broken every command rather than merely slowed it.
     const env = resolveLoginEnv();
@@ -226,7 +246,7 @@ describe('resolving the profile once instead of per command', () => {
     expect(String(found.stdout).trim()).toMatch(/git/);
   });
 
-  it('lets a caller override what the profile said', () => {
+  it.runIf(!IS_WIN)('lets a caller override what the profile said', () => {
     // Callers ask for specific things — a Docker context, a git prompt
     // turned off — and those must win over the inherited value.
     const res = spawnShellSync('echo "$MVPFY_TEST_MARKER"', {
@@ -236,4 +256,32 @@ describe('resolving the profile once instead of per command', () => {
     });
     expect(String(res.stdout).trim()).toBe('from-the-caller');
   });
+});
+
+describe('resolving the user environment without blocking', () => {
+  it.runIf(!IS_WIN)('puts the shell PATH first, then the inherited one, without duplicates', () => {
+    const merged = mergePosixPath('/opt/x/bin:/usr/bin', '/usr/bin:/bin').split(':');
+    expect(merged.slice(0, 3)).toEqual(['/opt/x/bin', '/usr/bin', '/bin']);
+    expect(new Set(merged).size).toBe(merged.length);
+    expect(merged).toContain('/opt/homebrew/bin');
+  });
+
+  it('adds the registry and install folders to the Windows PATH, trimmed and once', () => {
+    const merged = mergeWindowsPath('C:\\a; C:\\b', ['C:\\b', 'C:\\c ']).split(';');
+    expect(merged.slice(0, 3)).toEqual(['C:\\a', 'C:\\b', 'C:\\c']);
+    expect(new Set(merged).size).toBe(merged.length);
+  });
+
+  it.runIf(!IS_WIN)(
+    'leaves the login environment ready, so commands need no second shell',
+    async () => {
+      forgetLoginEnv();
+      await resolveUserEnvironment();
+      expect(resolveLoginEnv().PATH).toBeTruthy();
+      const found = spawnShellSync('command -v git', { encoding: 'utf8', timeout: 10_000 });
+      expect(found.status).toBe(0);
+    },
+    // An interactive login shell with no terminal can take its full 10 s.
+    30_000
+  );
 });

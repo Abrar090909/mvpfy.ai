@@ -100,7 +100,8 @@ export function validCloneUrl(value: unknown): value is string {
   }
   if (/^https:\/\/[^\s/@]+(:[0-9]+)?\/[^\s]+$/.test(text)) return true;
   if (/^ssh:\/\/[A-Za-z0-9._-]+@[^\s/]+\/[^\s]+$/.test(text)) return true;
-  return /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$/.test(text);
+  // Not starting with `-`, which git would take as an option, not a host.
+  return /^[A-Za-z0-9._][A-Za-z0-9._-]*@[A-Za-z0-9.-]+:[^\s]+$/.test(text);
 }
 
 /**

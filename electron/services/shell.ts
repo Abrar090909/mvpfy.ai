@@ -1,3 +1,4 @@
+import { posixQuote } from '../../shared/shellQuote';
 import { spawn, spawnSync, ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -97,11 +98,14 @@ export function spawnShell(command: string, opts: Parameters<typeof spawn>[2]): 
   if (IS_WIN) {
     return spawn(WIN_SHELL(), winShellArgs(command), { ...opts, windowsVerbatimArguments: true });
   }
-  if (!haveLoginEnv()) return spawn(USER_SHELL, ['-lc', command], opts);
+  // `detached` makes the shell a process-group leader, so killProcessTree can
+  // stop what it started and not just the shell (see signalGroup).
+  if (!haveLoginEnv()) return spawn(USER_SHELL, ['-lc', command], { ...opts, detached: true });
   // The caller's own env wins: it is asking for something specific, such as
   // the Docker context or a git prompt being turned off.
   return spawn(USER_SHELL, ['-c', command], {
     ...opts,
+    detached: true,
     env: { ...resolveLoginEnv(), ...(opts?.env ?? {}) },
   });
 }
@@ -123,6 +127,60 @@ export function spawnShellSync(
   });
 }
 
+/** What spawnShellSync returns, and the shape spawnShellAsync keeps. */
+export interface ShellResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * spawnShellSync without blocking the main process.
+ *
+ * The main process is the one that paints the window and carries every IPC
+ * message, so each spawnSync froze the app for as long as its command ran —
+ * a docker compose call polled every two seconds with a 15 s timeout, eight
+ * git calls per repository for a feature's status, a `gh` call per pull
+ * request. Same command, same shell, same result shape; it just waits
+ * without stopping everything else. A timeout kills the command and reports
+ * a null status, as spawnSync does.
+ */
+export function spawnShellAsync(
+  command: string,
+  opts: { timeout: number; env?: NodeJS.ProcessEnv; cwd?: string }
+): Promise<ShellResult> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let child: ChildProcess;
+    try {
+      child = spawnShell(command, {
+        ...(opts.cwd ? { cwd: opts.cwd } : {}),
+        ...(opts.env ? { env: opts.env } : {}),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      resolve({ status: null, stdout: '', stderr: String((error as Error).message) });
+      return;
+    }
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killProcessTree(child);
+    }, opts.timeout);
+    child.stdout?.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
+    child.stderr?.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      resolve({ status: null, stdout, stderr: stderr + String(error.message) });
+    });
+    child.on('close', (status) => {
+      clearTimeout(timer);
+      resolve({ status: timedOut ? null : status, stdout, stderr });
+    });
+  });
+}
+
 /**
  * `cd` into a directory as part of a shell command. cmd.exe will not follow a
  * path onto a different drive without /d — it changes the directory on that
@@ -135,7 +193,7 @@ export function cdTo(dir: string): string {
 
 export function shellQuote(value: string): string {
   if (IS_WIN) return `"${value.replace(/"/g, '""')}"`;
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+  return posixQuote(value);
 }
 
 /**
@@ -186,14 +244,63 @@ export function killProcessTree(child: ChildProcess | undefined): void {
   const pid = child?.pid;
   if (!child || !pid) return;
   if (IS_WIN) {
+    // Not spawnSync: taskkill can take seconds, and that froze the window
+    // every time somebody pressed Stop.
     try {
-      spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { timeout: 10_000 });
+      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' }).on(
+        'error',
+        () => undefined
+      );
     } catch {
-      // Fall through: better a stray process than a crash on quit.
+      // Better a stray process than a crash.
     }
     return;
   }
-  child.kill('SIGTERM');
+  signalGroup(child, pid, 'SIGTERM');
+  // Something that ignores SIGTERM (a dev server mid-shutdown, a hung agent)
+  // still has to go; unref'd so it never holds the app open.
+  setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) signalGroup(child, pid, 'SIGKILL');
+  }, 5_000).unref();
+}
+
+/**
+ * spawnShell starts the shell as a process-group leader (`detached`), so its
+ * pid is the group id and a negative pid signals the shell and everything it
+ * started — `cd x && claude …`, `docker compose up`, a dev server — together.
+ */
+function signalGroup(child: ChildProcess, pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // Not a group leader (or already gone): the shell alone is what is left.
+    try {
+      child.kill(signal);
+    } catch {
+      // Already exited.
+    }
+  }
+}
+
+/**
+ * Stop many runs at once, for quitting: on Windows one blocking taskkill for
+ * all of them — the app is about to exit, so it has to finish before that,
+ * but one call rather than one per run.
+ */
+export function killProcessTrees(children: ChildProcess[]): void {
+  if (!IS_WIN) {
+    for (const child of children) killProcessTree(child);
+    return;
+  }
+  const pids = children.map((c) => c.pid).filter((pid): pid is number => Boolean(pid));
+  if (pids.length === 0) return;
+  try {
+    spawnSync('taskkill', [...pids.flatMap((pid) => ['/pid', String(pid)]), '/T', '/F'], {
+      timeout: 10_000,
+    });
+  } catch {
+    // Fall through: better a stray process than a crash on quit.
+  }
 }
 
 /** `%VAR%` references, as stored in the registry's REG_EXPAND_SZ PATH. */
@@ -248,6 +355,11 @@ function registryPath(): string[] {
  * updated at all.
  */
 export function resolveWindowsPath(): void {
+  process.env.PATH = mergeWindowsPath(process.env.PATH || '', registryPath());
+}
+
+/** The inherited PATH, then the registry's, then where the tools install. */
+export function mergeWindowsPath(inherited: string, registry: string[]): string {
   const home = process.env.USERPROFILE || os.homedir();
   const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
   const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
@@ -261,11 +373,9 @@ export function resolveWindowsPath(): void {
     path.join(programFiles, 'Docker', 'Docker', 'resources', 'bin'),
   ];
   const merged = new Set(
-    [...(process.env.PATH || '').split(';'), ...registryPath(), ...extras]
-      .map((entry) => entry.trim())
-      .filter(Boolean)
+    [...inherited.split(';'), ...registry, ...extras].map((entry) => entry.trim()).filter(Boolean)
   );
-  process.env.PATH = [...merged].join(';');
+  return [...merged].join(';');
 }
 
 /**
@@ -285,18 +395,86 @@ export function resolveUserPath(): void {
       timeout: 10_000,
     });
     const match = result.stdout?.match(/__MVPFY_PATH__([^\n]*)/);
-    const shellPath = match?.[1] ?? '';
-    const extras = [
-      '/opt/homebrew/bin',
-      '/usr/local/bin',
-      path.join(os.homedir(), '.local', 'bin'),
-      path.join(os.homedir(), 'bin'),
-    ];
-    const merged = new Set(
-      [...shellPath.split(':'), ...(process.env.PATH || '').split(':'), ...extras].filter(Boolean)
-    );
-    process.env.PATH = [...merged].join(':');
+    process.env.PATH = mergePosixPath(match?.[1] ?? '', process.env.PATH ?? '');
   } catch {
     // Keep the inherited PATH; the Settings checklist will surface gaps.
+  }
+}
+
+/** The shell's PATH, then the inherited one, then the usual install spots. */
+export function mergePosixPath(shellPath: string, inherited: string): string {
+  const extras = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    path.join(os.homedir(), '.local', 'bin'),
+    path.join(os.homedir(), 'bin'),
+  ];
+  const merged = new Set(
+    [...shellPath.split(':'), ...inherited.split(':'), ...extras].filter(Boolean)
+  );
+  return [...merged].join(':');
+}
+
+/** A command's stdout and status, without blocking the main process. */
+function capture(
+  file: string,
+  args: string[],
+  timeoutMs: number
+): Promise<{ status: number | null; stdout: string }> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let child: ChildProcess;
+    try {
+      child = spawn(file, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      resolve({ status: null, stdout: '' });
+      return;
+    }
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.stdout?.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve({ status: null, stdout });
+    });
+    child.on('close', (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout });
+    });
+  });
+}
+
+/**
+ * resolveUserPath and resolveLoginEnv together, without blocking anything.
+ *
+ * Each started a login shell with spawnSync — the first before the window
+ * was even created (up to 10 s of nothing on screen), the second on the
+ * first command after it (up to 15 s of a frozen window). Here both shells
+ * run at once, off the main thread, and the results are merged exactly as
+ * the two did in sequence: the interactive shell's PATH first, then the
+ * login environment over the top of it.
+ */
+export async function resolveUserEnvironment(): Promise<void> {
+  if (IS_WIN) {
+    const keys = [
+      'HKCU\\Environment',
+      'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment',
+    ];
+    const answers = await Promise.all(
+      keys.map((key) => capture('reg', ['query', key, '/v', 'Path'], 10_000))
+    );
+    const registry = answers.flatMap((a) => (a.status === 0 ? parseRegistryPath(a.stdout) : []));
+    process.env.PATH = mergeWindowsPath(process.env.PATH ?? '', registry);
+    return;
+  }
+  const [interactive, login] = await Promise.all([
+    capture(USER_SHELL, ['-ilc', 'printf "__MVPFY_PATH__%s" "$PATH"'], 10_000),
+    loginEnvResolved ? null : capture(USER_SHELL, ['-lc', 'env -0'], 15_000),
+  ]);
+  const shellPath = interactive.stdout.match(/__MVPFY_PATH__([^\n]*)/)?.[1] ?? '';
+  process.env.PATH = mergePosixPath(shellPath, process.env.PATH ?? '');
+  if (login && !loginEnvResolved) {
+    loginEnvResolved = true;
+    const parsed = login.status === 0 ? parseEnvDump(login.stdout) : {};
+    if (parsed.PATH) cachedLoginEnv = { ...process.env, ...parsed };
   }
 }

@@ -211,7 +211,30 @@ export interface Settings {
    * from the same person would then diverge for no visible reason.
    */
   defaultStack: string;
+  /**
+   * How the app looks. Absent means dark — the workspace was designed dark
+   * first — and 'system' follows the operating system as it changes.
+   */
+  theme?: ThemeChoice;
 }
+
+export type ThemeChoice = 'dark' | 'light' | 'system';
+
+/** The theme actually shown, given a choice and whether the OS prefers light. */
+export function resolveTheme(
+  choice: ThemeChoice | undefined,
+  systemPrefersLight: boolean
+): 'dark' | 'light' {
+  if (choice === 'light') return 'light';
+  if (choice === 'system') return systemPrefersLight ? 'light' : 'dark';
+  return 'dark';
+}
+
+/** Each theme's canvas colour, for painting a window before its page loads. */
+export const THEME_BACKGROUND: Record<'dark' | 'light', string> = {
+  dark: '#0B0B0D',
+  light: '#FAFAFA',
+};
 
 /**
  * Deliberately ordinary, and deliberately close to what the bootstrap step
@@ -629,7 +652,11 @@ export interface MvpfyApi {
   ): Promise<CreateProjectResult & { remoteError?: string }>;
   /** Chosen folders, in pick order. Empty when the dialog was cancelled. */
   pickDirectory(): Promise<string[]>;
-  deleteProject(workspacePath: string): Promise<{ ok: boolean; error?: string }>;
+  /** `projectKey` names its feature checkouts (worktreeProjectKey), removed too. */
+  deleteProject(
+    workspacePath: string,
+    projectKey?: string
+  ): Promise<{ ok: boolean; error?: string }>;
   runAgent(req: RunAgentRequest): Promise<void>;
   stopRun(runId: string): Promise<void>;
   dockerCompose(runId: string, repoPath: string, action: ComposeAction): Promise<void>;

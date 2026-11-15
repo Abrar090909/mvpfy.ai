@@ -1,0 +1,21 @@
+# Only package.json, package-lock.json, tsconfig.worker.json, shared/ and
+# worker/ are used by Dockerfile.worker. Everything else stays out of the build
+# context — notably .git and any local node_modules or build output.
+.git
+node_modules
+dist
+dist-electron
+dist-worker
+release
+build
+assets
+docs
+src
+electron
+packaging
+scripts
+.design-sync
+.github
+*.log
+.env
+.env.*

@@ -11,14 +11,18 @@ import {
 const onMac = process.platform === 'darwin';
 
 describe('terminalCommand', () => {
-  it('wraps the command in an AppleScript that opens Terminal', () => {
+  it.runIf(process.platform === 'win32')('opens a cmd window that stays open on Windows', () => {
+    expect(terminalCommand('claude auth login')).toBe('start "" cmd /k claude auth login');
+  });
+
+  it.runIf(onMac)('wraps the command in an AppleScript that opens Terminal', () => {
     const out = terminalCommand('brew install gh');
     expect(out).toContain('osascript');
     expect(out).toContain('tell application "Terminal" to activate');
     expect(out).toContain('do script "brew install gh"');
   });
 
-  it('escapes quotes and backslashes so the AppleScript literal survives', () => {
+  it.runIf(onMac)('escapes quotes and backslashes so the AppleScript literal survives', () => {
     // The Homebrew installer's own line is full of quotes — the exact case
     // this has to get right.
     const out = terminalCommand('/bin/bash -c "$(curl -fsSL https://example.com/i.sh)"');
@@ -100,11 +104,15 @@ describe('installAllCommand', () => {
     expect(installAllCommand(['claude'])).toMatch(/echo .*installing Claude Code/);
   });
 
-  it('leaves out anything needing a password, and says so when nothing is left', () => {
-    // Those each need their own window: run in a pipe they hang on a prompt
-    // the user cannot see, which reads as an install that froze.
-    expect(() => installAllCommand(['git'])).toThrow(/without a password/i);
-  });
+  // On Windows git installs in-app, through winget, so nothing here needs a password.
+  it.runIf(process.platform !== 'win32')(
+    'leaves out anything needing a password, and says so when nothing is left',
+    () => {
+      // Those each need their own window: run in a pipe they hang on a prompt
+      // the user cannot see, which reads as an install that froze.
+      expect(() => installAllCommand(['git'])).toThrow(/without a password/i);
+    }
+  );
 
   it('ignores a tool with no installer on this platform', () => {
     expect(() => installAllCommand(['nonesuch'])).toThrow(/without a password/i);

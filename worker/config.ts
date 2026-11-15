@@ -98,8 +98,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): WorkerConfi
 export function secretsIn(config: WorkerConfig, env: NodeJS.ProcessEnv = process.env): string[] {
   return [
     config.runnerToken,
-    // The lease token is a per-attempt credential too; it is remembered as
-    // each execution is claimed, not here.
+    // The lease token is a per-attempt credential too; the engine remembers it
+    // as each execution starts (ExecutionEngine.run), not here.
     env.GH_TOKEN,
     env.GITHUB_TOKEN,
     env.ANTHROPIC_API_KEY,

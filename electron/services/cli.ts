@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { AgentKind, CliName, CliStatus, REQUIRED_CLIS } from '../../shared/types';
 import { terminalCommand } from './install';
-import { IS_WIN, resolveWindowsPath, shellQuote, spawnShellSync } from './shell';
+import { IS_WIN, resolveUserEnvironment, shellQuote, spawnShellAsync } from './shell';
 
 /** Detection of required CLIs and their sign-in state. */
 
@@ -13,10 +13,10 @@ const AUTH_PROBES: Partial<Record<CliName, string>> = {
   codex: 'codex login status',
 };
 
-function authCheck(name: CliName, found: boolean): boolean | null {
+async function authCheck(name: CliName, found: boolean): Promise<boolean | null> {
   const probe = AUTH_PROBES[name];
   if (!probe || !found) return probe ? false : null;
-  const result = spawnShellSync(probe, { encoding: 'utf8', timeout: 20_000 });
+  const result = await spawnShellAsync(probe, { timeout: 20_000 });
   if (name === 'claude') {
     return result.status === 0 && /"loggedIn":\s*true/.test(result.stdout);
   }
@@ -160,7 +160,7 @@ function codexModels(): string[] {
 }
 
 /** Ask an agent CLI which models it will accept. Empty when it will not say. */
-export function agentModels(agent: CliName): string[] {
+export async function agentModels(agent: CliName): Promise<string[]> {
   // Codex says nothing useful in its help; what it does have is the user's
   // own configuration.
   if (agent === 'codex') return codexModels();
@@ -172,7 +172,7 @@ export function agentModels(agent: CliName): string[] {
   // no cat, and gets the plain form; a short read there simply yields nothing
   // and the user types the name instead.
   const probe = IS_WIN ? `${help} 2>&1` : `${help} 2>&1 | cat`;
-  const result = spawnShellSync(probe, { encoding: 'utf8', timeout: 15_000 });
+  const result = await spawnShellAsync(probe, { timeout: 15_000 });
   return parseModelsFromHelp(result.stdout ?? '');
 }
 
@@ -198,22 +198,29 @@ export function mcpAddCommand(name: string, url: string, agent: AgentKind = 'cla
   );
 }
 
-export function cliCheck(): CliStatus[] {
+export async function cliCheck(): Promise<CliStatus[]> {
   // Re-read PATH from the registry first, so installing a tool (or fixing
   // PATH) and pressing Re-check works without restarting mvpfy. Two reg
   // queries are nothing next to the probes below. The macOS equivalent shells
   // out to an interactive login shell, which is far too slow to repeat here,
   // and is not needed: a new PATH there arrives with the next app launch.
-  if (IS_WIN) resolveWindowsPath();
-  return REQUIRED_CLIS.map((name) => {
-    const locator = IS_WIN ? `where ${name}` : `command -v ${name}`;
-    const result = spawnShellSync(locator, { encoding: 'utf8', timeout: 10_000 });
-    const found = result.status === 0 && result.stdout.trim().length > 0;
-    return {
-      name,
-      found,
-      path: found ? result.stdout.trim().split('\n')[0] : null,
-      authenticated: authCheck(name, found),
-    };
-  });
+  if (IS_WIN) await resolveUserEnvironment();
+  // Every tool at once, each one's locate-then-sign-in in order. They ran one
+  // after another with spawnSync, so a slow `claude auth status` held the
+  // whole window still for as long as all of them together took.
+  return Promise.all(
+    REQUIRED_CLIS.map(async (name) => {
+      const locator = IS_WIN ? `where ${name}` : `command -v ${name}`;
+      const result = await spawnShellAsync(locator, { timeout: 10_000 });
+      // `where` ends its lines with \r\n; keeping the \r put it in the path.
+      const first = result.stdout.split(/\r?\n/)[0]?.trim() ?? '';
+      const found = result.status === 0 && first.length > 0;
+      return {
+        name,
+        found,
+        path: found ? first : null,
+        authenticated: await authCheck(name, found),
+      };
+    })
+  );
 }

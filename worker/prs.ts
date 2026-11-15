@@ -17,6 +17,8 @@ export interface PullRequestRecord {
   baseBranch: string;
   /** False when this attempt found an existing pull request and reused it. */
   createdByThisAttempt: boolean;
+  /** OPEN, CLOSED or MERGED, as GitHub says; absent when not read. */
+  state?: string;
 }
 import { CommandRunner } from './exec';
 import { posixQuote, parseGitHubRepo } from './git';
@@ -77,7 +79,8 @@ export class PullRequests {
    *
    * Asked by head branch rather than by URL. `--state all` on purpose: a
    * closed pull request for this branch still means the worker must not open
-   * a second, and the caller is told rather than left to find out.
+   * a second, and the caller is told rather than left to find out — ensure()
+   * refuses one that is not open (see `state`).
    */
   async findExisting(target: PullRequestTarget): Promise<PullRequestRecord | null> {
     const res = await this.gh(
@@ -95,7 +98,9 @@ export class PullRequests {
     }
     // Matched on the branch again here, not just trusted from the query: a
     // wrong pull request attached to an artifact is worse than none.
-    const row = rows.find((r) => String(r.headRefName ?? '') === target.headBranch);
+    const mine = rows.filter((r) => String(r.headRefName ?? '') === target.headBranch);
+    // An open one first, when the branch has had several.
+    const row = mine.find((r) => String(r.state ?? 'OPEN').toUpperCase() === 'OPEN') ?? mine[0];
     if (!row) return null;
     const number = Number(row.number);
     const url = String(row.url ?? '');
@@ -108,6 +113,7 @@ export class PullRequests {
       headBranch: target.headBranch,
       baseBranch: String(row.baseRefName ?? target.baseBranch),
       createdByThisAttempt: false,
+      state: String(row.state ?? 'OPEN').toUpperCase(),
     };
   }
 
@@ -122,6 +128,16 @@ export class PullRequests {
    */
   async ensure(target: PullRequestTarget): Promise<PullRequestRecord> {
     const existing = await this.findExisting(target);
+    // A closed or merged one still means no second is opened — but it is not
+    // this attempt's result either. It used to be returned as though it were,
+    // and reported to Feature1 as the pull request for work it never held.
+    if (existing && existing.state && existing.state !== 'OPEN') {
+      throw new PullRequestError(
+        `The pull request for ${target.headBranch} is already ${existing.state.toLowerCase()} ` +
+          `(${existing.url}). Reopen it, or delete the branch so a new one can be opened.`,
+        ''
+      );
+    }
     if (existing) return existing;
 
     const bodyFile = path.join(target.worktree, '.mvpfy-pr-body.md');

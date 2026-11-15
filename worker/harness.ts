@@ -39,7 +39,10 @@ export class FakeGit {
   pushes: Array<{ dir: string; branch: string; base: string }> = [];
   failPush = new Set<string>();
   private commitCounter = 0;
-  readonly base = SHA('a');
+  /** The base branch tip; a test moves it to model the base moving on. */
+  base = SHA('a');
+  /** The start point each prepareWorktree was handed, in order. */
+  startPoints: Array<string | undefined> = [];
 
   constructor(private readonly layout: Layout) {}
 
@@ -51,12 +54,21 @@ export class FakeGit {
   async prepareWorktree(
     tenantId: string,
     executionId: string,
-    repo: ExecutionRepository
+    repo: ExecutionRepository,
+    startPoint?: string
   ): Promise<string> {
     if (this.unclonable.has(repo.id)) throw new Error(`could not read from remote ${repo.name}`);
+    this.startPoints.push(startPoint);
     const dir = this.layout.worktreeDir(tenantId, executionId, repo.id);
     fs.mkdirSync(dir, { recursive: true });
     return dir;
+  }
+
+  /** Checkouts removed after a hand-over, as `executionId/repositoryId`. */
+  removed: string[] = [];
+
+  async removeWorktree(_tenantId: string, executionId: string, repositoryId: string) {
+    this.removed.push(`${executionId}/${repositoryId}`);
   }
 
   private idOf(dir: string): string {
@@ -167,6 +179,7 @@ export interface Harness {
   root: string;
   layout: Layout;
   store: ExecutionStore;
+  redactor: Redactor;
   transport: FakeFeature1;
   git: FakeGit;
   prs: FakePullRequests;
@@ -223,6 +236,7 @@ export function makeHarness(opts: { nowIso?: string } = {}): Harness {
     prs,
     agent,
     runner,
+    redactor,
     engine,
     now,
     setNow: (iso: string) => {

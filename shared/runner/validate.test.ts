@@ -140,6 +140,8 @@ describe('field guards', () => {
     // worker refuses to use one: it would end up in a process list.
     expect(validCloneUrl('https://user:pw@github.com/acme/api.git')).toBe(false);
     expect(validCloneUrl('file:///etc/passwd')).toBe(false);
+    // git would read this as an option, not a host to clone from.
+    expect(validCloneUrl('-uupload-pack=touch /tmp/pwned@x:y')).toBe(false);
   });
 
   it('matches Feature1’s own idea of a base branch', () => {

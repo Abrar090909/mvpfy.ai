@@ -66,8 +66,12 @@ it can answer a sudo prompt from a pipe. The command is always shown before it r
 | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | in mvpfy (no Homebrew or Node)           |
 | `codex`  | `npm install -g @openai/codex`                    | in mvpfy                                 |
 
-Every command is the tool's own official install line. On Linux and Windows the commands are
-shown but not run for you.
+Every command is the tool's own official install line.
+
+**On Windows mvpfy installs them too**, through `winget` (built into Windows 10 1809+ and 11):
+`git`, `gh` and `codex` (with Node) install inside mvpfy, Claude Code through its official
+PowerShell installer, and Docker Desktop opens its own installer because it needs admin rights.
+Claude Code's sign-in opens a `cmd` window. On Linux the commands are shown but not run for you.
 
 **Connecting Feature1** (optional) lives in the same place: paste your workspace address —
 `acme.feature1.ai`, the full URL, or the MCP endpoint — and mvpfy works the tenant out of it,
@@ -324,8 +328,8 @@ The curated prompts live in `src/prompts/`:
 
 - **macOS** — primary platform, fully supported (can auto-start Docker Desktop).
 - **Linux** — supported; start the Docker daemon yourself.
-- **Windows** — experimental beta: commands run through `cmd.exe`; Docker Desktop must be
-  running. Feedback welcome.
+- **Windows** — beta: commands run through `cmd.exe`, tools install through `winget`, and
+  Docker Desktop must be running. The whole test suite runs on Windows in CI. Feedback welcome.
 
 Beta binaries are unsigned. On macOS, right-click → Open on first launch (or
 `xattr -dr com.apple.quarantine "/Applications/mvpfy by feature1.app"`).

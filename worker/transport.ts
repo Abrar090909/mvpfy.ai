@@ -41,10 +41,23 @@ export async function withRetry<T>(
     /** Injected so tests need no clock. */
     sleep?: (ms: number) => Promise<void>;
     onRetry?: (error: unknown, attempt: number) => void;
+    /**
+     * No retry starts after this long. Five attempts of up to 30 s each plus
+     * the backoff came to about 157 s against a 180 s lease — so a run of
+     * failures could outlast the lease it was trying to keep.
+     */
+    deadlineMs?: number;
+    /** Injected so tests need no clock. */
+    now?: () => number;
+    /** Injected so tests are deterministic. */
+    random?: () => number;
   } = {}
 ): Promise<T> {
   const attempts = opts.attempts ?? 5;
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const now = opts.now ?? Date.now;
+  const random = opts.random ?? Math.random;
+  const deadline = now() + (opts.deadlineMs ?? 90_000);
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -54,10 +67,13 @@ export async function withRetry<T>(
       if (name === 'StaleAttemptError' || name === 'PermanentTransportError') throw error;
       lastError = error;
       if (attempt === attempts) break;
-      opts.onRetry?.(error, attempt);
       // Bounded well inside the three-minute lease: a backoff that outlasts
-      // it would hand the execution to somebody else while we waited.
-      await sleep(Math.min(20_000, 500 * 2 ** (attempt - 1)));
+      // it would hand the execution to somebody else while we waited. Jittered,
+      // so workers that failed together do not all come back at once.
+      const delay = Math.min(20_000, 500 * 2 ** (attempt - 1)) * (0.5 + random() / 2);
+      if (now() + delay >= deadline) break;
+      opts.onRetry?.(error, attempt);
+      await sleep(delay);
     }
   }
   throw lastError;

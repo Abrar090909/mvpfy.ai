@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { checkEnv } from './childEnv';
 import { CommandRunner } from './exec';
 import { Redactor } from './redact';
 
@@ -34,6 +35,13 @@ export interface VerificationResult {
   summary: string;
   reason?: string;
   discovered?: boolean;
+  /**
+   * A step whose failure does not fail the repository — carried on the
+   * result, because the engine judges results and never sees the steps that
+   * discovery chose (it passed none, so a failing optional lint failed the
+   * repository anyway).
+   */
+  optional?: boolean;
 }
 
 /**
@@ -69,8 +77,9 @@ export interface VerifyOptions {
  * right way round — "ready for testing" with nothing tested was always a
  * weak claim. It does mean a repository with no runnable check cannot be
  * handed over, which is worth knowing before pointing a worker at one.
+ *
+ * (The rule itself is enforced in canReport, below.)
  */
-export const VERIFICATION_IS_MANDATORY = true;
 
 const DEFAULT_STEP_TIMEOUT = 20 * 60_000;
 
@@ -86,16 +95,19 @@ function summarise(text: string, redactor: Redactor): string {
 export class Verifier {
   constructor(
     private readonly runner: CommandRunner,
-    private readonly redactor: Redactor
+    private readonly redactor: Redactor,
+    // The repo's own scripts run here; they get no credentials (childEnv.ts).
+    private readonly env: NodeJS.ProcessEnv = checkEnv()
   ) {}
 
   /**
    * Commands worth trying when the assignment named none.
    *
-   * Only offered when the assignment sets `allowDiscovery`, and every result
-   * from it is marked `discovered` — because "tests passed" from a command
-   * nobody asked for is a weaker claim than one that was specified, and the
-   * report should not blur the two.
+   * The engine names no steps, so this is how every repository is checked:
+   * the contract leaves choosing the checks to the worker. Every result from
+   * here is marked `discovered`, because "tests passed" from a command nobody
+   * asked for is a weaker claim than one that was specified, and the report
+   * should not blur the two.
    */
   discoverSteps(repositoryId: string, worktree: string): VerificationStep[] {
     const steps: VerificationStep[] = [];
@@ -146,6 +158,7 @@ export class Verifier {
       command: this.redactor.line(step.command, 200),
       repositoryId: step.repositoryId,
       ...(opts.discovered ? { discovered: true } : {}),
+      ...(step.optional ? { optional: true } : {}),
     };
     if (!worktree) {
       return {
@@ -159,6 +172,7 @@ export class Verifier {
     }
     const res = await this.runner.run(step.command, {
       cwd: worktree,
+      env: this.env,
       timeoutMs: step.timeoutMs ?? DEFAULT_STEP_TIMEOUT,
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
@@ -254,7 +268,7 @@ export function verificationFailed(
   steps: VerificationStep[]
 ): boolean {
   const optional = new Set(steps.filter((s) => s.optional).map((s) => s.id));
-  return results.some((r) => !optional.has(r.stepId) && r.outcome === 'failed');
+  return results.some((r) => !r.optional && !optional.has(r.stepId) && r.outcome === 'failed');
 }
 
 /**
@@ -282,30 +296,4 @@ export function canReport(
     return { ok: false, reason: `No check passed in this repository — ${why}` };
   }
   return { ok: true };
-}
-
-/**
- * Everything required actually passed.
- *
- * Deliberately not the same question as the one above, because
- * `unavailable` sits between them and the difference matters.
- *
- * A repository with no test script tells us nothing — but nothing failed in
- * it either, and reporting that execution as `failed` would state something
- * untrue about work that may be perfectly good. It would also make the
- * worker useless against the many real repositories that have no suite.
- * `ready_for_testing` is the honest outcome there: a person now has to test
- * it, which is exactly what the state is called.
- *
- * So this decides the wording rather than the outcome. The result carries
- * every step, its outcome and the reason it could not run, and the pull
- * request body puts the same table in front of the reviewer — nobody has to
- * read "ready" as "checked".
- */
-export function verificationHeld(
-  results: VerificationResult[],
-  steps: VerificationStep[]
-): boolean {
-  const optional = new Set(steps.filter((s) => s.optional).map((s) => s.id));
-  return results.every((r) => optional.has(r.stepId) || r.outcome === 'passed');
 }

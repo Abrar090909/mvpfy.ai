@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ComposeAction, ComposeProgress, ServiceState } from '../../shared/types';
-import { IS_WIN, shellQuote, spawnShellSync } from './shell';
+import { IS_WIN, shellQuote, spawnShellAsync, spawnShellSync } from './shell';
 
 /** Docker specifics: local-context pinning, daemon checks, command builders. */
 
@@ -15,19 +16,45 @@ export function localDockerContext(): string | null {
     encoding: 'utf8',
     timeout: 10_000,
   });
-  const names =
-    result.status === 0
-      ? result.stdout
-          .split('\n')
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [];
-  cachedLocalDockerContext = names.includes('desktop-linux')
+  cachedLocalDockerContext = pickLocalContext(result.status === 0 ? result.stdout : '');
+  return cachedLocalDockerContext;
+}
+
+/**
+ * `docker compose` pointed at the file mvpfy generated: beside the code for a
+ * managed clone, inside `.mvpfy/` for a linked folder (whose root it must not
+ * litter), with the project directory kept at the repo root either way.
+ */
+export function composeBase(linked: boolean): string {
+  return linked
+    ? 'docker compose -f .mvpfy/docker-compose.mvpfy.yml --project-directory .'
+    : 'docker compose -f docker-compose.mvpfy.yml';
+}
+
+/**
+ * Resolves the Docker context ahead of the first command that needs it, so
+ * localDockerContext's spawnSync never runs inside an IPC call: started at
+ * launch, off the main thread, beside the user environment.
+ */
+export async function primeLocalDockerContext(): Promise<void> {
+  if (cachedLocalDockerContext !== undefined) return;
+  const result = await spawnShellAsync('docker context ls --format "{{.Name}}"', {
+    timeout: 10_000,
+  });
+  if (cachedLocalDockerContext !== undefined) return;
+  cachedLocalDockerContext = pickLocalContext(result.status === 0 ? result.stdout : '');
+}
+
+function pickLocalContext(stdout: string): string | null {
+  const names = stdout
+    .split('\n')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return names.includes('desktop-linux')
     ? 'desktop-linux'
     : names.includes('default')
       ? 'default'
       : null;
-  return cachedLocalDockerContext;
 }
 
 export function spawnEnv(): NodeJS.ProcessEnv {
@@ -38,8 +65,14 @@ export function spawnEnv(): NodeJS.ProcessEnv {
 // If the local daemon is down, launch Docker Desktop and wait for it
 // (PMs won't know the whale needs to be running first). Only macOS can
 // reliably auto-start Docker Desktop; elsewhere we fail with a clear message.
+//
+// Parenthesised on Windows, and that is not style. cmd.exe gives `||` lower
+// precedence than `&&`, so `docker info || (…) && docker compose up` parses as
+// `docker info || ((…) && docker compose up)`: with Docker running, the
+// command every caller appends was skipped, silently, with exit code 0 —
+// starting the app, restarting it, the editor and seeding all did nothing.
 export const ENSURE_DAEMON = IS_WIN
-  ? 'docker info >NUL 2>&1 || (echo Docker is not running — start Docker Desktop and retry. && exit /b 1)'
+  ? '(docker info >NUL 2>&1 || (echo Docker is not running — start Docker Desktop and retry. && exit /b 1))'
   : process.platform === 'darwin'
     ? 'docker info >/dev/null 2>&1 || { echo "Docker is not running — starting Docker Desktop…"; ' +
       'open -a Docker >/dev/null 2>&1; ' +
@@ -47,11 +80,29 @@ export const ENSURE_DAEMON = IS_WIN
     : 'docker info >/dev/null 2>&1 || { echo "Docker daemon is not running — start it (e.g. systemctl start docker) and retry."; exit 1; }';
 
 export function ideContainerName(workspacePath: string): string {
+  const resolved = path.resolve(workspacePath);
   const base = path
-    .basename(workspacePath)
+    .basename(resolved)
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, '-');
-  return `mvpfy-ide-${base}`;
+  // The folder name alone collided: ~/a/app and ~/b/app were both
+  // mvpfy-ide-app, so starting one editor removed the other's, and the status
+  // check reported the wrong project's. A short hash of the full path keeps
+  // the readable name and makes it this folder's alone.
+  const hash = createHash('sha256').update(resolved).digest('hex').slice(0, 8);
+  return `mvpfy-ide-${base}-${hash}`;
+}
+
+/**
+ * The name earlier versions gave the editor's container. Cleared alongside the
+ * current one, so an editor started before the upgrade is not left running —
+ * holding its port, serving its folder — with nothing that knows its name.
+ */
+export function legacyIdeContainerName(workspacePath: string): string {
+  return `mvpfy-ide-${path
+    .basename(path.resolve(workspacePath))
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')}`;
 }
 
 /**
@@ -60,11 +111,13 @@ export function ideContainerName(workspacePath: string): string {
  * code-server may later bind the same port, which would embed the WRONG
  * project's editor if trusted).
  */
-export function ideStatus(workspacePath: string): { running: boolean; port: number | null } {
+export async function ideStatus(
+  workspacePath: string
+): Promise<{ running: boolean; port: number | null }> {
   const name = ideContainerName(workspacePath);
-  const result = spawnShellSync(
+  const result = await spawnShellAsync(
     `docker ps --filter ${shellQuote(`name=^${name}$`)} --format "{{.Ports}}"`,
-    { encoding: 'utf8', timeout: 10_000, env: spawnEnv() }
+    { timeout: 10_000, env: spawnEnv() }
   );
   if (result.status !== 0) return { running: false, port: null };
   const line = (result.stdout ?? '').trim().split('\n')[0] ?? '';
@@ -120,14 +173,14 @@ export function parseComposePs(stdout: string): ServiceState[] {
  * afterwards is the only way to tell an app that is still booting from one
  * that is never coming.
  */
-export function composeStatus(workspacePath: string, linked: boolean): ServiceState[] {
-  const base = linked
-    ? 'docker compose -f .mvpfy/docker-compose.mvpfy.yml --project-directory .'
-    : 'docker compose -f docker-compose.mvpfy.yml';
+export async function composeStatus(
+  workspacePath: string,
+  linked: boolean
+): Promise<ServiceState[]> {
+  const base = composeBase(linked);
   // cwd rather than chdir: the compose file path is relative, and changing the
   // main process's own directory would race every other command it runs.
-  const result = spawnShellSync(`${base} ps -a --format json`, {
-    encoding: 'utf8',
+  const result = await spawnShellAsync(`${base} ps -a --format json`, {
     timeout: 15_000,
     env: spawnEnv(),
     cwd: workspacePath,
@@ -175,28 +228,25 @@ export function parseInspectEnv(json: string): Record<string, string> {
  * different things about them: one is "we do not know", the other is "this
  * container has no variables at all".
  */
-export function runningEnv(
+export async function runningEnv(
   workspacePath: string,
   linked: boolean,
   service: string
-): Record<string, string> | null {
+): Promise<Record<string, string> | null> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(service.trim())) return null;
-  const base = linked
-    ? 'docker compose -f .mvpfy/docker-compose.mvpfy.yml --project-directory .'
-    : 'docker compose -f docker-compose.mvpfy.yml';
+  const base = composeBase(linked);
   const opts = {
-    encoding: 'utf8' as const,
     timeout: 15_000,
     env: spawnEnv(),
     cwd: workspacePath,
   };
-  const ids = spawnShellSync(`${base} ps -q ${shellQuote(service.trim())}`, opts);
+  const ids = await spawnShellAsync(`${base} ps -q ${shellQuote(service.trim())}`, opts);
   if (ids.status !== 0) return null;
   // The first line: a service scaled past one is not something mvpfy
   // generates, and the first container is the honest answer for the rest.
   const id = (ids.stdout ?? '').trim().split('\n')[0]?.trim();
   if (!id) return null;
-  const inspected = spawnShellSync(
+  const inspected = await spawnShellAsync(
     `docker inspect --format ${shellQuote('{{json .Config.Env}}')} ${shellQuote(id)}`,
     opts
   );
@@ -216,17 +266,20 @@ export function runningEnv(
  *
  * Only the tail, so the cost does not grow with the log.
  */
-export function composeProgress(workspacePath: string, linked: boolean): ComposeProgress {
-  const services = composeStatus(workspacePath, linked);
-  const base = linked
-    ? 'docker compose -f .mvpfy/docker-compose.mvpfy.yml --project-directory .'
-    : 'docker compose -f docker-compose.mvpfy.yml';
-  const result = spawnShellSync(`${base} logs --tail 5 --no-color`, {
-    encoding: 'utf8',
-    timeout: 15_000,
-    env: spawnEnv(),
-    cwd: workspacePath,
-  });
+export async function composeProgress(
+  workspacePath: string,
+  linked: boolean
+): Promise<ComposeProgress> {
+  const base = composeBase(linked);
+  // Both at once: neither depends on the other, and this is polled.
+  const [services, result] = await Promise.all([
+    composeStatus(workspacePath, linked),
+    spawnShellAsync(`${base} logs --tail 5 --no-color`, {
+      timeout: 15_000,
+      env: spawnEnv(),
+      cwd: workspacePath,
+    }),
+  ]);
   const text = result.status === 0 ? (result.stdout ?? '') : '';
   // A hash rather than the text: this crosses IPC on every poll, and only
   // whether it changed is ever asked.
@@ -268,9 +321,7 @@ export function composeCommand(action: ComposeAction, linked = false): string {
   // Linked repos keep the compose file inside .mvpfy/; --project-directory
   // pins relative build contexts and volume paths to the workspace root so
   // the file's content works identically in both modes.
-  const base = linked
-    ? 'docker compose -f .mvpfy/docker-compose.mvpfy.yml --project-directory .'
-    : 'docker compose -f docker-compose.mvpfy.yml';
+  const base = composeBase(linked);
   // Follow-mode container logs: no daemon auto-start (fails fast when down).
   if (action === 'logs') {
     return `${base} logs -f --tail=200`;
@@ -356,9 +407,7 @@ export function restartServiceCommand(service: string, linked = false): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(service.trim())) {
     throw new Error('That is not a service name');
   }
-  const base = linked
-    ? 'docker compose -f .mvpfy/docker-compose.mvpfy.yml --project-directory .'
-    : 'docker compose -f docker-compose.mvpfy.yml';
+  const base = composeBase(linked);
   // --build as well as --force-recreate: a value the app reads at startup is
   // picked up by recreating, but one baked into the image at build time — a
   // frontend that inlines its API address, an ARG in the Dockerfile — is not,
@@ -372,17 +421,24 @@ export function restartServiceCommand(service: string, linked = false): string {
 
 export function ideCommand(workspacePath: string, action: 'up' | 'down', port?: number): string {
   const name = ideContainerName(workspacePath);
-  if (action === 'down') return `${ENSURE_DAEMON} && docker rm -f ${name}`;
+  const legacy = legacyIdeContainerName(workspacePath);
+  // Clear any container left from a previous run, ignoring "no such container",
+  // then carry on regardless of that outcome — `&` is cmd's unconditional
+  // separator, the counterpart of the shell's `;`.
+  const quietlyThenContinue = IS_WIN ? '>NUL 2>&1 &' : '>/dev/null 2>&1;';
+  if (action === 'down') {
+    return `${ENSURE_DAEMON} && docker rm -f ${legacy} ${quietlyThenContinue} docker rm -f ${name}`;
+  }
   if (!Number.isInteger(port) || (port as number) < 1024 || (port as number) > 65000) {
     throw new Error('A valid port is required to start the IDE');
   }
-  // Clear any container left from a previous run, ignoring "no such container",
-  // then start regardless of that outcome — `&` is cmd's unconditional
-  // separator, the counterpart of the shell's `;`.
-  const quietlyThenContinue = IS_WIN ? '>NUL 2>&1 &' : '>/dev/null 2>&1;';
+  // Published on loopback only. code-server runs with --auth none, so a plain
+  // `-p port:8080` (every interface) handed an unauthenticated editor and
+  // terminal over this repo to anyone on the same network.
   return (
-    `${ENSURE_DAEMON} && docker rm -f ${name} ${quietlyThenContinue} ` +
-    `docker run -d --name ${name} -p ${port}:8080 ` +
+    `${ENSURE_DAEMON} && docker rm -f ${legacy} ${quietlyThenContinue} ` +
+    `docker rm -f ${name} ${quietlyThenContinue} ` +
+    `docker run -d --name ${name} -p 127.0.0.1:${port}:8080 ` +
     `-v ${shellQuote(workspacePath)}:/home/coder/project ` +
     `codercom/code-server:latest --auth none --bind-addr 0.0.0.0:8080 /home/coder/project`
   );

@@ -79,15 +79,26 @@ export class HttpFeature1Transport implements Feature1Transport {
         signal: controller.signal,
       });
     } catch (error) {
+      clearTimeout(timer);
       // Never reached the server, so the call may not have happened at all.
       throw new TransientTransportError(
         `${what} could not reach Feature1: ${(error as Error).message}`
       );
+    }
+
+    // The timeout covers the body too. It was cleared once the headers came
+    // back, so a server that answered and then stalled hung this call — a
+    // heartbeat included — for good, and the lease ran out underneath it.
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (error) {
+      throw new TransientTransportError(
+        `${what}: Feature1 stopped answering part-way: ${(error as Error).message}`
+      );
     } finally {
       clearTimeout(timer);
     }
-
-    const text = await res.text().catch(() => '');
     // 409 is the server saying this attempt no longer holds the execution.
     if (res.status === 409) {
       throw new StaleAttemptError(readError(text) ?? 'Lease expired or superseded');

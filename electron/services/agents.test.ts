@@ -144,7 +144,7 @@ describe('codexCommandFor', () => {
 
   it('continues the feature thread once one is known', () => {
     const cmd = codexCommandFor({ session: { id: 'thread-1', resume: true } }, opts);
-    expect(cmd).toContain("--json resume 'thread-1' - ");
+    expect(cmd).toContain(`--json resume ${shellQuote('thread-1')} - `);
   });
 
   it('never invents an id for a thread codex has not opened', () => {
@@ -160,12 +160,13 @@ describe('codexCommandFor', () => {
       { session: { id: 't', resume: true }, model: 'gpt-5', images: ['/tmp/a.png'] },
       { ...opts, mcpFlag: '--mcp x ' }
     );
-    expect(cmd).toMatch(
-      /codex exec --mcp x --image '\/tmp\/a\.png' --model 'gpt-5' --sandbox danger-full-access --skip-git-repo-check --json resume 't' - /
+    expect(cmd).toContain(
+      `codex exec --mcp x --image ${shellQuote('/tmp/a.png')} --model ${shellQuote('gpt-5')} ` +
+        `--sandbox danger-full-access --skip-git-repo-check --json resume ${shellQuote('t')} - `
     );
   });
 
   it('reads the prompt from the file rather than the command line', () => {
-    expect(codexCommandFor({}, opts)).toContain("--json - < '/tmp/p.txt'");
+    expect(codexCommandFor({}, opts)).toContain(`--json - < ${shellQuote('/tmp/p.txt')}`);
   });
 });

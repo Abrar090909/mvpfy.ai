@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  assertFeatureLocation,
   PROJECTS_DIR,
   WORKTREES_DIR,
   isAllowedWorkspace,
@@ -86,6 +87,27 @@ describe('what a terminal may be opened in', () => {
   it('does not admit anywhere else, which is the whole point of the guard', () => {
     for (const elsewhere of ['/etc', '/Users/pm/Documents', `${WORKTREES_DIR}-next-door`]) {
       expect(admitted(elsewhere), elsewhere).toBe(false);
+    }
+  });
+});
+
+describe('assertFeatureLocation', () => {
+  it('accepts the two config folders and the slugs mvpfy mints', () => {
+    for (const slug of ['', 'paging', 'dark-mode', 'feature1-wat-f-1-2', 'v2.1_beta']) {
+      expect(() => assertFeatureLocation('', slug)).not.toThrow();
+      expect(() => assertFeatureLocation('.mvpfy/', slug)).not.toThrow();
+    }
+  });
+
+  it('refuses a config folder that climbs out of the workspace', () => {
+    for (const dir of ['../..', '/etc', '.mvpfy/../..', '.mvpfy', 'x/']) {
+      expect(() => assertFeatureLocation(dir, 'paging'), dir).toThrow(/config folder/);
+    }
+  });
+
+  it('refuses a slug that could carry a path with it', () => {
+    for (const slug of ['../../etc', 'a/../../b', 'a\\..\\b', '..', '.hidden', 'a..b', '-x']) {
+      expect(() => assertFeatureLocation('', slug), slug).toThrow(/feature name/);
     }
   });
 });

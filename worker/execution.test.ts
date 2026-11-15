@@ -3,12 +3,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { IDS, featureExecution } from '../shared/runner/fixtures';
+import { checkEnv } from './childEnv';
 import { ScriptedRunner } from './exec';
 import { Redactor, plainRedactor } from './redact';
 import { Git, parseGitHubRepo, posixQuote } from './git';
 import { Layout } from './layout';
 import { PullRequests, pullRequestBody } from './prs';
-import { Verifier, verificationHeld } from './verify';
+import { Verifier } from './verify';
 
 let root: string;
 beforeEach(() => {
@@ -241,6 +242,16 @@ describe('Verifier', () => {
     expect(results[0].summary).toContain('2 failing');
   });
 
+  it("runs the repository's checks without the worker's credentials", async () => {
+    const runner = new ScriptedRunner().when(/npm test/, { code: 0 });
+    const env = { PATH: '/usr/bin', MVPFY_RUNNER_TOKEN: 'rt', GH_TOKEN: 'gh', OPENAI_API_KEY: 'k' };
+    await new Verifier(runner, plainRedactor, checkEnv(env)).verifyRepository(IDS.repoApi, {
+      worktrees,
+      steps,
+    });
+    expect(runner.calls[0].env).toEqual({ PATH: '/usr/bin' });
+  });
+
   it('never counts a check that could not run as a pass', async () => {
     // 127 is the shell saying the command is not there. Calling that a
     // failing test sends somebody looking for a bug in the code.
@@ -307,34 +318,6 @@ describe('Verifier', () => {
   });
 });
 
-describe('verificationHeld', () => {
-  const steps = [
-    {
-      id: 'v-api-test',
-      kind: 'test' as const,
-      name: 'tests',
-      command: 'npm test',
-      repositoryId: IDS.repoApi,
-    },
-  ];
-  const result = (stepId: string, outcome: string) =>
-    ({ stepId, outcome }) as unknown as Parameters<typeof verificationHeld>[0][number];
-
-  it('holds only when everything required passed', () => {
-    expect(verificationHeld([result('v-api-test', 'passed')], steps)).toBe(true);
-    expect(verificationHeld([result('v-api-test', 'failed')], steps)).toBe(false);
-  });
-
-  it('does not let an unavailable check stand in for a pass', () => {
-    expect(verificationHeld([result('v-api-test', 'unavailable')], steps)).toBe(false);
-  });
-
-  it('lets an optional check fail', () => {
-    const optional = [{ ...steps[0], id: 'v-lint', optional: true }];
-    expect(verificationHeld([result('v-lint', 'failed')], optional)).toBe(true);
-  });
-});
-
 describe('PullRequests', () => {
   const target = {
     worktree: '/w/api',
@@ -356,6 +339,26 @@ describe('PullRequests', () => {
     const pr = await new PullRequests(runner, plainRedactor).ensure({ ...target, worktree: root });
     expect(pr.number).toBe(7);
     expect(pr.createdByThisAttempt).toBe(false);
+    expect(runner.calls.some((c) => c.command.includes('pr create'))).toBe(false);
+  });
+
+  it('neither opens a second pull request nor reports a merged one as its own', async () => {
+    // A merged or closed pull request on the branch used to come back as this
+    // attempt's result. It is still a reason not to open another — but the
+    // caller is now told, rather than handed it as live work.
+    const merged = JSON.stringify([
+      {
+        number: 7,
+        url: 'https://github.com/acme/api/pull/7',
+        headRefName: 'mvpfy/exec',
+        baseRefName: 'main',
+        state: 'MERGED',
+      },
+    ]);
+    const runner = new ScriptedRunner().when(/pr list/, { stdout: merged });
+    await expect(
+      new PullRequests(runner, plainRedactor).ensure({ ...target, worktree: root })
+    ).rejects.toThrow(/already merged/);
     expect(runner.calls.some((c) => c.command.includes('pr create'))).toBe(false);
   });
 

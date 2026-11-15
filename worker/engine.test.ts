@@ -166,6 +166,65 @@ describe('verification', () => {
     expect(h.transport.progressCalls.at(-1)?.body.message).toMatch(/No check passed/);
   });
 
+  it('hands over a repository whose only failure is an optional check', async () => {
+    // Discovery marks lint optional, but the engine judged results against
+    // an empty step list, so a red lint failed the repository anyway.
+    const { claimed, checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    withLintScript(h, checkpoint.execution, IDS.repoApi);
+    h.runner.when(/npm run lint/, { code: 1, stderr: '12 problems' });
+    const ending = await h.engine.run(checkpoint, never);
+    expect(ending).toBe('ready_for_testing');
+    // Only what passed goes to Feature1, which takes nothing else.
+    const tests = h.transport.resultsOf(claimed.id)[IDS.repoApi].tests;
+    expect(tests.map((t) => t.command)).toEqual(['npm test --silent']);
+  });
+
+  it('still fails the repository when a required check fails beside an optional one', async () => {
+    const { checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    withLintScript(h, checkpoint.execution, IDS.repoApi);
+    h.runner.when(/npm run lint/, { code: 1 }).when(/npm test/, { code: 1 });
+    expect(await h.engine.run(checkpoint, never)).toBe('failed');
+  });
+
+  it('fails, and leaves the unit to be built again, when the agent crashes', async () => {
+    const { checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    h.agent.outcomes = [{ code: 1, tail: 'Error: out of memory' }];
+    expect(await h.engine.run(checkpoint, never)).toBe('failed');
+    expect(checkpoint.completedUnits).toEqual([]);
+    const message = h.transport.progressCalls.at(-1)?.body.message ?? '';
+    expect(message).toMatch(/exit code 1/);
+    // The agent's own output stays on the worker.
+    expect(message).not.toContain('out of memory');
+  });
+
+  it('keeps the attempt’s lease token out of anything it logs or reports', async () => {
+    const { claimed, checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    await h.engine.run(checkpoint, never);
+    expect(claimed.lease_token).toBeTruthy();
+    expect(h.redactor.redact(`header X-Execution-Lease: ${claimed.lease_token}`)).not.toContain(
+      claimed.lease_token
+    );
+  });
+
+  it('removes its checkouts once the work is handed over', async () => {
+    const { claimed, checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    expect(await h.engine.run(checkpoint, never)).toBe('ready_for_testing');
+    expect(h.git.removed).toEqual([`${claimed.id}/${IDS.repoApi}`]);
+  });
+
+  it('keeps the checkouts of an execution that failed, for the next attempt', async () => {
+    const { checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    h.runner.when(/npm test/, { code: 1 });
+    expect(await h.engine.run(checkpoint, never)).toBe('failed');
+    expect(h.git.removed).toEqual([]);
+  });
+
   it('sends only the commands that passed', async () => {
     const { claimed, checkpoint } = await start(standaloneStoryExecution());
     agentChanges(h, IDS.repoApi);
@@ -322,6 +381,39 @@ describe('resuming an execution Feature1 handed back', () => {
     expect(Object.keys(h.transport.resultsOf(claimed.id)).sort()).toEqual(
       [IDS.repoApi, IDS.repoWeb].sort()
     );
+  });
+
+  it('is not failed by what went wrong in the previous attempt', async () => {
+    // A GitHub hiccup recorded on the row used to fail every reclaim after it.
+    const { claimed, checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    checkpoint.repositories[0].error = 'Could not open a pull request: HTTP 502';
+    h.store.save(checkpoint);
+    expect(await h.engine.run(checkpoint, never)).toBe('ready_for_testing');
+    expect(h.transport.resultsOf(claimed.id)[IDS.repoApi]).toBeDefined();
+  });
+
+  it('keeps the base commit it started from when the base branch has moved on', async () => {
+    // The branch was cut from the first base. Re-resolving on a reclaim
+    // reported a base the work was never built on, and called an untouched
+    // branch changed.
+    const { claimed, checkpoint } = await start(standaloneStoryExecution());
+    const original = h.git.base;
+    checkpoint.repositories[0].baseCommit = original;
+    h.store.save(checkpoint);
+    h.git.base = 'c'.repeat(40); // someone merged to main in between
+
+    expect(await h.engine.run(checkpoint, never)).toBe('ready_for_testing');
+    expect(h.git.startPoints).toEqual([original]);
+    const result = h.transport.resultsOf(claimed.id)[IDS.repoApi];
+    expect(result.base_commit).toBe(original);
+  });
+
+  it('cuts a new branch from the base commit it resolved, not a moving tip', async () => {
+    await start(standaloneStoryExecution()).then(({ checkpoint }) =>
+      h.engine.run(checkpoint, never)
+    );
+    expect(h.git.startPoints).toEqual([h.git.base]);
   });
 
   it('reuses a pull request a previous attempt already opened', async () => {
