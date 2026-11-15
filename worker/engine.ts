@@ -168,6 +168,9 @@ export class ExecutionEngine {
     const { execution } = checkpoint;
     this.leaseUntil = Date.parse(execution.lease_until ?? '') || 0;
     this.superseded = false;
+    // The lease token is this attempt's credential: kept out of every log and
+    // report from here on, as config.ts always said it was. Nothing did it.
+    this.deps.redactor.remember(execution.lease_token);
     try {
       return await this.execute(checkpoint, signal);
     } catch (error) {
@@ -198,13 +201,22 @@ export class ExecutionEngine {
     for (const repo of execution.repositories) {
       const row = this.deps.store.repository(checkpoint, repo.id);
       if (row.reported) continue; // A previous attempt already finished it.
+      // What went wrong last attempt is not this attempt's problem. Left in
+      // the checkpoint, one GitHub 502 failed every reclaim after it, at the
+      // `if (row.error)` in publishRepository, however healthy things became.
+      delete row.error;
       try {
         const authorised = authorisedRepository(execution, repo.id);
-        row.baseCommit = await this.deps.git.baseCommit(execution.tenant_id, authorised);
+        // Resolved once per execution, then kept. The branch is cut from this
+        // commit, so re-resolving on a reclaim — after the base had moved —
+        // made an untouched branch look changed and sent Feature1 a base the
+        // work was never built on.
+        row.baseCommit ??= await this.deps.git.baseCommit(execution.tenant_id, authorised);
         worktrees[repo.id] = await this.deps.git.prepareWorktree(
           execution.tenant_id,
           execution.id,
-          authorised
+          authorised,
+          row.baseCommit
         );
         row.prepared = true;
       } catch (error) {
@@ -262,8 +274,24 @@ export class ExecutionEngine {
           outcome.questions.map((q, i) => `${i + 1}. ${q}`).join(' ')
         );
       }
-      if (outcome.code !== 0) {
-        this.log(`${execution.id}: agent exited ${outcome.code} on ${label}`);
+      if (outcome.code !== 0 || outcome.timedOut) {
+        // An agent that crashed or ran out of time did not finish the unit.
+        // It used to be logged and then counted as done anyway — verified,
+        // handed over half-built, and never attempted again on a reclaim.
+        // What it did write is committed, so the next attempt builds on it,
+        // and the unit stays open for that attempt. The tail stays on the
+        // worker for the operator; it is never reported.
+        this.log(`${execution.id}: agent exited ${outcome.code} on ${label}: ${outcome.tail}`);
+        await this.commitUnit(checkpoint, worktrees, unit);
+        this.deps.store.save(checkpoint, this.now());
+        const why = outcome.timedOut
+          ? 'ran out of time'
+          : `stopped with exit code ${outcome.code ?? 'unknown'}`;
+        return this.finish(
+          checkpoint,
+          'failed',
+          `The coding agent ${why} while building ${label}.`
+        );
       }
       await this.commitUnit(checkpoint, worktrees, unit);
       checkpoint.completedUnits.push(unit.id);
@@ -592,7 +620,25 @@ export class ExecutionEngine {
     checkpoint.reported = true;
     this.deps.store.save(checkpoint, this.now());
     this.log(`${checkpoint.execution.id} → ${state}: ${message}`);
+    if (state === 'ready_for_testing') await this.removeWorktrees(checkpoint);
     return state;
+  }
+
+  /**
+   * Handed over: everything is pushed, so the checkouts are only disk. A
+   * failed or interrupted execution keeps its own, for the attempt after it.
+   * Best effort — a checkout that will not go is a full disk later, not a
+   * reason to call finished work anything else.
+   */
+  private async removeWorktrees(checkpoint: ExecutionCheckpoint): Promise<void> {
+    const { execution } = checkpoint;
+    for (const repo of execution.repositories) {
+      try {
+        await this.deps.git.removeWorktree(execution.tenant_id, execution.id, repo.id);
+      } catch (error) {
+        this.log(`${repo.id}: could not remove its checkout: ${(error as Error).message}`);
+      }
+    }
   }
 }
 

@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { tunnelCommand } from './share';
+import { shellQuote } from './shell';
 
 describe('tunnelCommand', () => {
   it('points the tunnel at the app and never updates mid-share', () => {
     // An update restarts cloudflared and changes the address, which is a link
     // going dead in somebody else's browser.
     const cmd = tunnelCommand(4100);
-    expect(cmd).toContain("--url 'http://localhost:4100'");
+    expect(cmd).toContain(`--url ${shellQuote('http://localhost:4100')}`);
     expect(cmd).toContain('--no-autoupdate');
   });
 
@@ -14,7 +15,7 @@ describe('tunnelCommand', () => {
     // A share arrives as four random words. An app that reads its tenant out
     // of the hostname finds none and shows the visitor nothing.
     expect(tunnelCommand(4100, 'acme.localhost:4100')).toContain(
-      "--http-host-header 'acme.localhost:4100'"
+      `--http-host-header ${shellQuote('acme.localhost:4100')}`
     );
   });
 

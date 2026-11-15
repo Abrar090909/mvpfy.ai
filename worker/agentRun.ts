@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { claudeCommandFor, codexCommandFor, posixShell } from '../shared/agentCommands';
+import { agentEnv } from './childEnv';
 import { CommandRunner, CommandResult } from './exec';
 
 /**
@@ -56,7 +57,7 @@ export function parseQuestions(text: string): string[] {
 export class CliAgentRunner implements AgentRunner {
   constructor(
     private readonly runner: CommandRunner,
-    private readonly env: NodeJS.ProcessEnv = process.env
+    private readonly env: NodeJS.ProcessEnv = agentEnv()
   ) {}
 
   async run(input: Parameters<AgentRunner['run']>[0]): Promise<AgentOutcome> {

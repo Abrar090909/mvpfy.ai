@@ -41,10 +41,33 @@ export interface CommandRunner {
 const DEFAULT_TIMEOUT = 30 * 60_000;
 const DEFAULT_MAX_OUTPUT = 512 * 1024;
 
-/** Keep the tail: the reason a command failed is at the end of its output. */
-function tail(chunks: string[], max: number): string {
-  const joined = chunks.join('');
-  return joined.length <= max ? joined : `…${joined.slice(-max)}`;
+/**
+ * The last `max` characters of a stream, held as it arrives.
+ *
+ * Keep the tail: the reason a command failed is at the end of its output. It
+ * used to keep every chunk and trim once the command ended — so a two-hour
+ * agent run or a noisy build held all of its output in memory first, then
+ * briefly twice over while joining it. This never holds more than about
+ * twice `max`, however long the command runs.
+ */
+export class TailBuffer {
+  private text = '';
+  private truncated = false;
+
+  constructor(private readonly max: number) {}
+
+  push(chunk: string): void {
+    this.text += chunk;
+    if (this.text.length > this.max * 2) {
+      this.text = this.text.slice(-this.max);
+      this.truncated = true;
+    }
+  }
+
+  toString(): string {
+    if (!this.truncated && this.text.length <= this.max) return this.text;
+    return `…${this.text.slice(-this.max)}`;
+  }
 }
 
 export class ShellRunner implements CommandRunner {
@@ -62,8 +85,8 @@ export class ShellRunner implements CommandRunner {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
-      const out: string[] = [];
-      const err: string[] = [];
+      const out = new TailBuffer(max);
+      const err = new TailBuffer(max);
       let timedOut = false;
       let cancelled = false;
       let settled = false;
@@ -95,6 +118,13 @@ export class ShellRunner implements CommandRunner {
       child.stdout?.on('data', (d: Buffer) => out.push(d.toString('utf8')));
       child.stderr?.on('data', (d: Buffer) => err.push(d.toString('utf8')));
 
+      // When the command itself ends, whatever it left running in its group
+      // goes with it: a dev server or watcher an agent started in the
+      // background otherwise kept its port and its hold on the worktree for
+      // the life of the worker — and, holding stdout open, kept 'close' from
+      // firing until the timeout, two hours for an agent.
+      child.on('exit', () => killGroup('SIGKILL'));
+
       const finish = (code: number | null) => {
         if (settled) return;
         settled = true;
@@ -102,8 +132,8 @@ export class ShellRunner implements CommandRunner {
         opts.signal?.removeEventListener('abort', onAbort);
         resolve({
           code,
-          stdout: this.redactor.redact(tail(out, max)),
-          stderr: this.redactor.redact(tail(err, max)),
+          stdout: this.redactor.redact(out.toString()),
+          stderr: this.redactor.redact(err.toString()),
           timedOut,
           cancelled,
           durationMs: Date.now() - started,
@@ -127,7 +157,7 @@ export class ShellRunner implements CommandRunner {
  * that true is for the thing that would is injected.
  */
 export class ScriptedRunner implements CommandRunner {
-  readonly calls: Array<{ command: string; cwd: string }> = [];
+  readonly calls: Array<{ command: string; cwd: string; env?: NodeJS.ProcessEnv }> = [];
 
   constructor(
     private readonly script: Array<{
@@ -146,7 +176,7 @@ export class ScriptedRunner implements CommandRunner {
   }
 
   async run(command: string, opts: RunOptions): Promise<CommandResult> {
-    this.calls.push({ command, cwd: opts.cwd });
+    this.calls.push({ command, cwd: opts.cwd, ...(opts.env ? { env: opts.env } : {}) });
     for (const rule of this.script) {
       if (!rule.match.test(command)) continue;
       if (rule.times !== undefined) {

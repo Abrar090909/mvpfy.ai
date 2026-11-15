@@ -36,6 +36,41 @@ export function setLinkedRoots(roots: string[]): void {
   linkedRoots = roots.map((r) => path.resolve(r));
 }
 
+// The renderer saves the whole state, and linked roots are read out of it —
+// so without this, renderer code saving `{mode: 'linked', localPath: '/'}`
+// would make every guard below pass for the whole disk. A linked root has to
+// have come from the main process: a folder linkProject resolved, or one the
+// state on disk already held when the app started.
+const approvedLinkedRoots = new Set<string>();
+
+export function approveLinkedRoot(root: string): void {
+  approvedLinkedRoots.add(path.resolve(root));
+}
+
+export function isApprovedLinkedRoot(root: string): boolean {
+  return approvedLinkedRoots.has(path.resolve(root));
+}
+
+/** Test hook: forget every approval. */
+export function resetLinkedRootApprovals(): void {
+  approvedLinkedRoots.clear();
+}
+
+/** The only config folders a project uses (see configDirFor). */
+const CONFIG_DIRS = new Set(['', '.mvpfy/']);
+
+/**
+ * A feature's config folder and slug, as they arrive from the renderer to be
+ * joined onto a workspace path — and, in deleteFeatureFiles, handed to rm.
+ * Either one carrying `..` or a separator would climb out of the workspace.
+ */
+export function assertFeatureLocation(configDir: string, slug: string): void {
+  if (!CONFIG_DIRS.has(configDir)) throw new Error('That is not a project config folder');
+  if (slug !== '' && (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slug) || slug.includes('..'))) {
+    throw new Error('That is not a feature name');
+  }
+}
+
 export function isLinkedPath(candidate: string): boolean {
   const resolved = path.resolve(candidate);
   return linkedRoots.some((root) => resolved === root || resolved.startsWith(root + path.sep));

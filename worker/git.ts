@@ -1,3 +1,4 @@
+import { posixQuote } from '../shared/shellQuote';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ExecutionRepository } from '../shared/runner/contract';
@@ -18,9 +19,7 @@ import { Layout, executionBranch } from './layout';
  * switches on the host platform. The worker runs every command through
  * `/bin/sh`, so host-sensitive quoting would be wrong rather than portable.
  */
-export function posixQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+export { posixQuote };
 
 /**
  * Where a fetch puts what it brings back, and the reason this is not the
@@ -100,7 +99,7 @@ export class Git {
     fs.mkdirSync(path.dirname(dir), { recursive: true });
     await this.git(
       path.dirname(dir),
-      `clone --bare ${posixQuote(repo.url)} ${posixQuote(dir)}`,
+      `clone --bare -- ${posixQuote(repo.url)} ${posixQuote(dir)}`,
       30 * 60_000
     );
     // A bare clone has no origin fetch refspec by default, and the obvious
@@ -133,7 +132,9 @@ export class Git {
   async prepareWorktree(
     tenantId: string,
     executionId: string,
-    repo: ExecutionRepository
+    repo: ExecutionRepository,
+    /** The base commit the execution recorded; a new branch starts here. */
+    startPoint?: string
   ): Promise<string> {
     const branch = executionBranch(executionId);
     if (!validRef(branch)) throw new Error(`Refusing an unusable branch name: ${branch}`);
@@ -144,17 +145,44 @@ export class Git {
       return tree;
     }
     fs.mkdirSync(path.dirname(tree), { recursive: true });
+    // A worktree whose directory went missing (a cleaned volume, a crash
+    // mid-delete) stays registered, and `worktree add` then refuses the path
+    // for good. Pruning first forgets registrations with nothing behind them.
+    await this.git(clone, 'worktree prune');
     const exists = await this.hasBranch(clone, branch);
     await this.git(
       clone,
       exists
         ? `worktree add ${posixQuote(tree)} ${posixQuote(branch)}`
-        : // From the tip of the base branch the execution named, resolved
-          // once and reported, rather than from whatever is checked out.
+        : // From the base commit the execution resolved once and reports —
+          // not the branch tip now, which may have moved since — falling
+          // back to that tip when no commit was recorded.
           `worktree add -b ${posixQuote(branch)} ${posixQuote(tree)} ` +
-            posixQuote(`refs/remotes/origin/${repo.base_branch}`)
+            posixQuote(
+              startPoint && /^[0-9a-f]{7,40}$/i.test(startPoint)
+                ? startPoint
+                : `refs/remotes/origin/${repo.base_branch}`
+            )
     );
     return tree;
+  }
+
+  /**
+   * Remove an execution's checkout once its work is handed over.
+   *
+   * Only the working tree goes: the branch stays in the clone (and on the
+   * remote), so a revision recreates the checkout from it. Without this every
+   * execution left a full checkout behind and the volume only ever grew.
+   */
+  async removeWorktree(tenantId: string, executionId: string, repositoryId: string): Promise<void> {
+    const clone = this.layout.cloneDir(tenantId, repositoryId);
+    const tree = this.layout.worktreeDir(tenantId, executionId, repositoryId);
+    // --force discards whatever is in the tree, so it must be one of ours.
+    if (!this.layout.contains(tree)) throw new Error(`Refusing to remove ${tree}`);
+    if (fs.existsSync(path.join(clone, 'HEAD')) && fs.existsSync(tree)) {
+      await this.git(clone, `worktree remove --force ${posixQuote(tree)}`);
+    }
+    if (fs.existsSync(path.join(clone, 'HEAD'))) await this.git(clone, 'worktree prune');
   }
 
   async hasBranch(dir: string, branch: string): Promise<boolean> {
@@ -214,13 +242,13 @@ export class Git {
     return this.headCommit(dir);
   }
 
-  /** Everything the agent changed or added, as paths git will take. */
+  /**
+   * Everything the agent changed or added, as paths git will take — less any
+   * new file that looks like a credential (see parseStatus).
+   */
   async changedPaths(dir: string): Promise<string[]> {
     const out = await this.git(dir, 'status --porcelain=v1 -z --untracked-files=all');
-    return out
-      .split('\0')
-      .map((entry) => entry.slice(3).trim())
-      .filter(Boolean);
+    return parseStatus(out).paths;
   }
 
   /**
@@ -247,6 +275,59 @@ export class Git {
   async originUrl(dir: string): Promise<string> {
     return (await this.git(dir, 'remote get-url origin')).trim();
   }
+}
+
+/**
+ * A file name that holds a secret, not code: `.env` and its variants, keys and
+ * certificates, package-manager and cloud credentials. Templates meant to be
+ * committed (`.env.example`) are not.
+ */
+export function looksLikeSecret(file: string): boolean {
+  const parts = file.split('/');
+  const name = (parts[parts.length - 1] ?? '').toLowerCase();
+  if (parts.slice(0, -1).some((dir) => dir === '.ssh' || dir === '.aws' || dir === '.gnupg')) {
+    return true;
+  }
+  if (/^\.env(\..+)?$/.test(name)) return !/\.(example|sample|template|dist)$/.test(name);
+  if (/\.(pem|key|p12|pfx|jks|keystore|kdbx)$/.test(name)) return true;
+  if (/^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/.test(name)) return !name.endsWith('.pub');
+  return ['.npmrc', '.netrc', '.pypirc', '.git-credentials', 'credentials.json'].includes(name);
+}
+
+/**
+ * `git status --porcelain=v1 -z` read as the paths to commit.
+ *
+ * Each entry is `XY path`, except a rename or copy, which is `XY new` followed
+ * by the original path as an entry of its own — taking that one as `XY path`
+ * too cut three characters off it, and `git add` then failed the repository.
+ * Only the new side is taken; the rename is already staged, removal and all.
+ *
+ * Untracked files are new work and are committed, with one exception: a new
+ * file that looks like a credential (looksLikeSecret) is withheld. The agent
+ * runs with permission checks off and sometimes writes a `.env` while
+ * debugging; one the repository does not ignore would otherwise be pushed in
+ * the pull request. Tracked files are the repository's own choice and pass.
+ */
+export function parseStatus(out: string): { paths: string[]; withheld: string[] } {
+  const entries = out.split('\0');
+  const paths: string[] = [];
+  const withheld: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 4) continue;
+    const code = entry.slice(0, 2);
+    const file = entry.slice(3);
+    if (code === '??' && looksLikeSecret(file)) {
+      withheld.push(file);
+      continue;
+    }
+    paths.push(file);
+    // The original's own entry: consumed, not staged. Porcelain only reports
+    // R or C once the rename is in the index, so the removal is already
+    // staged — and `git add` of a path in neither index nor tree fails.
+    if (code.includes('R') || code.includes('C')) i++;
+  }
+  return { paths, withheld };
 }
 
 /**

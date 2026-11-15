@@ -41,7 +41,8 @@ const api: MvpfyApi = {
   createBlankProject: (name: string, remote: BlankProjectRemote) =>
     ipcRenderer.invoke('create-blank-project', name, remote),
   pickDirectory: () => ipcRenderer.invoke('pick-directory'),
-  deleteProject: (workspacePath: string) => ipcRenderer.invoke('delete-project', workspacePath),
+  deleteProject: (workspacePath: string, projectKey?: string) =>
+    ipcRenderer.invoke('delete-project', workspacePath, projectKey),
   runAgent: (req: RunAgentRequest) => ipcRenderer.invoke('run-agent', req),
   stopRun: (runId: string) => ipcRenderer.invoke('stop-run', runId),
   dockerCompose: (runId: string, repoPath: string, action: ComposeAction) =>

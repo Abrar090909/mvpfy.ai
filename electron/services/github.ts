@@ -1,5 +1,5 @@
 import { PullRequestState } from '../../shared/types';
-import { shellQuote, spawnShellSync } from './shell';
+import { shellQuote, spawnShellAsync } from './shell';
 
 /**
  * What GitHub says about the pull requests mvpfy raised.
@@ -37,52 +37,71 @@ export function rollUpChecks(rollup: unknown): PullRequestState['checks'] {
   return pending ? 'pending' : 'passing';
 }
 
-export function pullRequestStates(urls: string[]): PullRequestState[] {
-  const out: PullRequestState[] = [];
-  for (const raw of urls) {
-    const url = raw.trim();
-    const blank: PullRequestState = {
-      url,
-      number: 0,
-      title: '',
-      state: '',
-      isDraft: false,
-      checks: 'none',
-      reviewDecision: '',
-    };
-    if (!isPullRequestUrl(url)) {
-      out.push({ ...blank, error: 'Not a pull request URL' });
-      continue;
+/** How many `gh pr view` calls run at once: quick, without hammering the API. */
+const PR_LOOKUPS_AT_ONCE = 4;
+
+/**
+ * Each pull request's state, in the order asked.
+ *
+ * One `gh` call per pull request, a few at a time and off the main thread —
+ * they ran one after another with spawnSync, up to 30 s each, and the window
+ * froze for all of it.
+ */
+export async function pullRequestStates(urls: string[]): Promise<PullRequestState[]> {
+  const out: PullRequestState[] = new Array(urls.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < urls.length) {
+      const index = next++;
+      out[index] = await pullRequestState(urls[index]);
     }
-    const res = spawnShellSync(
-      `gh pr view ${shellQuote(url)} --json number,state,isDraft,title,reviewDecision,statusCheckRollup`,
-      { encoding: 'utf8', timeout: 30_000 }
-    );
-    if (res.status !== 0) {
-      // Not signed in, no access, or GitHub is down. Saying which beats an
-      // empty row that reads as "nothing is happening".
-      out.push({
-        ...blank,
-        error: (res.stderr || res.stdout || '').trim().split('\n')[0] || 'gh could not read it',
-      });
-      continue;
-    }
-    try {
-      const d = JSON.parse(res.stdout) as Record<string, unknown>;
-      out.push({
-        url,
-        number: Number(d.number) || 0,
-        title: String(d.title ?? ''),
-        state: String(d.state ?? '').toUpperCase(),
-        isDraft: d.isDraft === true,
-        checks: rollUpChecks(d.statusCheckRollup),
-        reviewDecision: String(d.reviewDecision ?? '').toUpperCase(),
-      });
-    } catch {
-      out.push({ ...blank, error: 'gh answered something unreadable' });
-    }
-  }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(PR_LOOKUPS_AT_ONCE, urls.length) }, () => worker())
+  );
   return out;
+}
+
+async function pullRequestState(raw: string): Promise<PullRequestState> {
+  const url = raw.trim();
+  const blank: PullRequestState = {
+    url,
+    number: 0,
+    title: '',
+    state: '',
+    isDraft: false,
+    checks: 'none',
+    reviewDecision: '',
+  };
+  if (!isPullRequestUrl(url)) {
+    return { ...blank, error: 'Not a pull request URL' };
+  }
+  const res = await spawnShellAsync(
+    `gh pr view ${shellQuote(url)} --json number,state,isDraft,title,reviewDecision,statusCheckRollup`,
+    { timeout: 30_000 }
+  );
+  if (res.status !== 0) {
+    // Not signed in, no access, or GitHub is down. Saying which beats an
+    // empty row that reads as "nothing is happening".
+    return {
+      ...blank,
+      error: (res.stderr || res.stdout || '').trim().split('\n')[0] || 'gh could not read it',
+    };
+  }
+  try {
+    const d = JSON.parse(res.stdout) as Record<string, unknown>;
+    return {
+      url,
+      number: Number(d.number) || 0,
+      title: String(d.title ?? ''),
+      state: String(d.state ?? '').toUpperCase(),
+      isDraft: d.isDraft === true,
+      checks: rollUpChecks(d.statusCheckRollup),
+      reviewDecision: String(d.reviewDecision ?? '').toUpperCase(),
+    };
+  } catch {
+    return { ...blank, error: 'gh answered something unreadable' };
+  }
 }
 
 /**
@@ -111,11 +130,13 @@ export function autoMergeCommand(urls: string[]): string {
     if (!isPullRequestUrl(url)) continue;
     const q = shellQuote(url);
     const name = url.replace(/^https:\/\/[^/]+\//, '').replace('/pull/', ' #');
+    // The whole step in parentheses: on cmd.exe `a || b && c` is `a || (b && c)`,
+    // which armed the first pull request and silently skipped the rest.
     steps.push(
-      `(echo ${shellQuote(`── ${name}`)} && gh pr merge ${q} --squash --auto --delete-branch) || ` +
+      `((echo ${shellQuote(`── ${name}`)} && gh pr merge ${q} --squash --auto --delete-branch) || ` +
         `echo ${shellQuote(
           `${name}: GitHub would not arm auto-merge — usually because the repository has it switched off (Settings → General → Pull Requests). The pull request is open and merging it is yours`
-        )}`
+        )})`
     );
   }
   if (steps.length === 0) return '';

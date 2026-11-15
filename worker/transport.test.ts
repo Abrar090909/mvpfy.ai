@@ -181,6 +181,55 @@ describe('withRetry', () => {
     expect(Math.max(...waits)).toBeLessThanOrEqual(20_000);
     expect(waits.reduce((a, b) => a + b, 0)).toBeLessThan(120_000);
   });
+
+  it('starts no retry once its deadline has passed, however many attempts remain', async () => {
+    // Slow failures — each one a 30 s timeout — used to add up past the lease.
+    let clock = 0;
+    let calls = 0;
+    await withRetry(
+      async () => {
+        calls++;
+        clock += 30_000; // every attempt times out
+        throw new TransientTransportError('slow');
+      },
+      { attempts: 5, sleep, now: () => clock, deadlineMs: 90_000 }
+    ).catch(() => undefined);
+    expect(calls).toBe(3);
+    expect(clock).toBeLessThanOrEqual(90_000);
+  });
+
+  it('spreads its waits, so workers that failed together do not return together', async () => {
+    const waitsFor = async (random: () => number) => {
+      const waits: number[] = [];
+      await withRetry(
+        async () => {
+          throw new TransientTransportError('always');
+        },
+        { attempts: 3, sleep: async (ms) => void waits.push(ms), random }
+      ).catch(() => undefined);
+      return waits;
+    };
+    expect(await waitsFor(() => 0)).not.toEqual(await waitsFor(() => 1));
+  });
+});
+
+describe('a response that stalls part-way', () => {
+  it('times out as a transient failure instead of hanging forever', async () => {
+    // Headers arrive, then the body never does.
+    const fetchImpl = vi.fn(
+      async (_url: string, init: RequestInit) =>
+        ({
+          status: 200,
+          ok: true,
+          text: () =>
+            new Promise<string>((_resolve, reject) =>
+              init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+            ),
+        }) as unknown as Response
+    ) as unknown as typeof fetch;
+    const t = new HttpFeature1Transport({ ...base, fetchImpl, timeoutMs: 50 });
+    await expect(t.progress('exec-1', 'lease', {})).rejects.toBeInstanceOf(TransientTransportError);
+  });
 });
 
 describe('FakeFeature1', () => {

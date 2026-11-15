@@ -1,3 +1,4 @@
+import { posixQuote } from './shellQuote';
 import { DEFAULT_STATE, RunAgentRequest } from './types';
 
 /**
@@ -19,8 +20,8 @@ export interface CommandShell {
 }
 
 export const posixShell: CommandShell = {
-  quote: (value) => `'${value.replace(/'/g, `'\\''`)}'`,
-  cd: (dir) => `cd '${dir.replace(/'/g, `'\\''`)}'`,
+  quote: posixQuote,
+  cd: (dir) => `cd ${posixQuote(dir)}`,
 };
 
 /**

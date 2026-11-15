@@ -32,6 +32,8 @@ describe('loginCommand', () => {
       const command = loginCommand('claude');
       expect(command).toContain('osascript');
       expect(command).toContain('claude auth login');
+    } else if (process.platform === 'win32') {
+      expect(loginCommand('claude')).toBe('start "" cmd /k claude auth login');
     } else {
       expect(() => loginCommand('claude')).toThrow(/Run "claude auth login" in a terminal/);
     }

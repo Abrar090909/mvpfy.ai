@@ -3,15 +3,17 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  ENSURE_DAEMON,
   composeCommand,
   ideCommand,
   ideContainerName,
+  legacyIdeContainerName,
   parseComposePs,
   parseInspectEnv,
   restartServiceCommand,
   seedCommandFor,
 } from './docker';
-import { IS_WIN } from './shell';
+import { IS_WIN, spawnShellSync } from './shell';
 
 describe('composeCommand', () => {
   it('clears orphans on both halves, so a renamed service cannot hold its port', () => {
@@ -34,7 +36,7 @@ describe('composeCommand', () => {
 
   it('checks the daemon first for anything that starts or stops containers', () => {
     for (const action of ['up', 'down', 'restart'] as const) {
-      expect(composeCommand(action).startsWith('docker info'), action).toBe(true);
+      expect(composeCommand(action).startsWith(ENSURE_DAEMON), action).toBe(true);
     }
   });
 
@@ -61,13 +63,35 @@ describe('ideCommand', () => {
     expect(command).toContain('docker run -d --name');
   });
 
+  it('publishes the unauthenticated editor on loopback only', () => {
+    const command = ideCommand('/Users/pm/code/shop', 'up', 8443);
+    expect(command).toContain('-p 127.0.0.1:8443:8080');
+    expect(command).not.toMatch(/-p 8443:8080/);
+  });
+
   it('refuses a port outside the safe range rather than building a bad command', () => {
     expect(() => ideCommand('/Users/pm/code/shop', 'up', 80)).toThrow(/valid port/);
     expect(() => ideCommand('/Users/pm/code/shop', 'up')).toThrow(/valid port/);
   });
 
   it('names the container from the workspace, safely', () => {
-    expect(ideContainerName('/Users/pm/code/My App!')).toBe('mvpfy-ide-my-app-');
+    expect(ideContainerName('/Users/pm/code/My App!')).toMatch(/^mvpfy-ide-my-app--[0-9a-f]{8}$/);
+  });
+
+  it('gives two folders with the same name different containers', () => {
+    // Both used to be mvpfy-ide-app: starting one editor removed the other's.
+    expect(ideContainerName('/Users/pm/a/app')).not.toBe(ideContainerName('/Users/pm/b/app'));
+    expect(ideContainerName('/Users/pm/a/app')).toBe(ideContainerName('/Users/pm/a/app'));
+  });
+
+  it('clears an editor started under the old name, so an upgrade orphans nothing', () => {
+    for (const command of [
+      ideCommand('/Users/pm/a/app', 'up', 8443),
+      ideCommand('/Users/pm/a/app', 'down'),
+    ]) {
+      expect(command).toContain(`docker rm -f ${legacyIdeContainerName('/Users/pm/a/app')}`);
+    }
+    expect(legacyIdeContainerName('/Users/pm/a/app')).toBe('mvpfy-ide-app');
   });
 });
 
@@ -211,7 +235,7 @@ describe('composeCommand rebuild', () => {
   });
 
   it('checks the daemon first, like every other action that touches containers', () => {
-    expect(composeCommand('rebuild').startsWith('docker info')).toBe(true);
+    expect(composeCommand('rebuild').startsWith(ENSURE_DAEMON)).toBe(true);
   });
 });
 
@@ -248,7 +272,7 @@ describe('restartServiceCommand', () => {
   });
 
   it('checks the daemon first, like every other action that touches containers', () => {
-    expect(restartServiceCommand('backend').startsWith('docker info')).toBe(true);
+    expect(restartServiceCommand('backend').startsWith(ENSURE_DAEMON)).toBe(true);
   });
 
   it('finds the compose file where a linked project keeps it', () => {
@@ -297,5 +321,36 @@ describe('parseInspectEnv', () => {
     expect(parseInspectEnv('{"API_URL":"x"}')).toEqual({});
     // A row with no name is not a variable.
     expect(parseInspectEnv('["=orphan","OK=1"]')).toEqual({ OK: '1' });
+  });
+});
+
+describe('the Docker daemon guard, run by the real shell', () => {
+  // `docker info` stood in for by commands that succeed or fail, so this runs
+  // anywhere: what is under test is how the guard chains with what follows.
+  const guard = (daemonUp: boolean) =>
+    ENSURE_DAEMON.replace(
+      'docker info',
+      daemonUp ? 'git --version' : IS_WIN ? 'cmd /c exit 1' : 'false'
+    );
+
+  it('runs the command after it when Docker is up', () => {
+    // On Windows this printed nothing and exited 0: the start, restart, editor
+    // and seed commands every caller appends were skipped.
+    const res = spawnShellSync(`${guard(true)} && echo COMMAND-RAN`, {
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    expect(res.stdout).toContain('COMMAND-RAN');
+  });
+
+  it.runIf(process.platform !== 'darwin')('stops, and says why, when Docker is down', () => {
+    // (macOS starts Docker Desktop and waits for it instead.)
+    const res = spawnShellSync(`${guard(false)} && echo COMMAND-RAN`, {
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    expect(res.stdout).not.toContain('COMMAND-RAN');
+    expect(res.stdout).toMatch(/not running/);
+    expect(res.status).not.toBe(0);
   });
 });

@@ -7,7 +7,13 @@ on:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    # macOS as well as Linux: it is the primary platform, and the shell layer
+    # (login shells, process groups, AppleScript) branches on it.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,3 +24,22 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+  windows:
+    # Windows is a supported beta: commands go through cmd.exe, whose quoting
+    # and operator precedence differ enough that "it passes on Linux" says
+    # little — `a || b && c` means something else there, and that once left
+    # every Docker command and every multi-repository git command silently
+    # doing nothing. The suite runs the real shell, so it catches that here.
+    # (Lint runs on the POSIX jobs: a Windows checkout has CRLF line endings.)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run build:worker

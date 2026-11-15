@@ -101,7 +101,9 @@ describe('configFromEnv', () => {
  * uses a fake git, so without this nothing proves the commands are even
  * valid.
  */
-describe('Git, against real git', () => {
+// The worker runs every command through /bin/sh and refuses to start on
+// Windows (index.ts), so its real-git behaviour is checked where it runs.
+describe.runIf(process.platform !== 'win32')('Git, against real git', () => {
   const gitAvailable = (() => {
     try {
       execFileSync('git', ['--version'], { stdio: 'ignore' });
@@ -163,10 +165,34 @@ describe('Git, against real git', () => {
         const commits = await git.commitsSince(tree, baseCommit);
         expect(commits.map((c) => c.subject)).toEqual(['US-01: add a file']);
 
+        // A staged rename and a stray credential: the rename commits whole,
+        // and the .env the agent left behind does not go out in the PR.
+        run(['mv', 'added.txt', 'renamed.txt'], tree);
+        fs.writeFileSync(path.join(tree, '.env'), 'API_KEY=secret\n');
+        const next = await git.changedPaths(tree);
+        expect(next).toEqual(['renamed.txt']);
+        expect(await git.commit(tree, 'US-02: rename it', next)).toMatch(/^[0-9a-f]{40}$/);
+        const committed = run(['show', '--name-status', '--format=', 'HEAD'], tree);
+        expect(committed).toMatch(/^R\d*\s+added\.txt\s+renamed\.txt$/m);
+        expect(committed).not.toContain('.env');
+        fs.rmSync(path.join(tree, '.env'));
+
         // Resuming finds the branch rather than making a second one.
         const again = await git.prepareWorktree(tenant, execution, repo);
         expect(again).toBe(tree);
         expect(await git.hasUncommittedChanges(tree)).toBe(false);
+
+        // Handed over: the checkout goes, the branch stays, and a revision
+        // gets the checkout back from it.
+        await git.removeWorktree(tenant, execution, repo.id);
+        expect(fs.existsSync(tree)).toBe(false);
+        const revived = await git.prepareWorktree(tenant, execution, repo);
+        expect(fs.existsSync(path.join(revived, 'renamed.txt'))).toBe(true);
+
+        // A checkout deleted behind git's back is pruned, not a dead end.
+        fs.rmSync(revived, { recursive: true, force: true });
+        const recreated = await git.prepareWorktree(tenant, execution, repo);
+        expect(fs.existsSync(path.join(recreated, 'renamed.txt'))).toBe(true);
       } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
       }

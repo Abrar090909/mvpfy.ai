@@ -3,7 +3,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_STATE, MvpfyState, Project } from '../../shared/types';
-import { isLinkedPath, setLinkedRoots } from '../paths';
+import {
+  approveLinkedRoot,
+  isLinkedPath,
+  resetLinkedRootApprovals,
+  setLinkedRoots,
+} from '../paths';
 import { readState, writeState } from './store';
 
 let dir: string;
@@ -17,6 +22,7 @@ beforeEach(() => {
 afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
   setLinkedRoots([]);
+  resetLinkedRootApprovals();
 });
 
 function project(overrides: Partial<Project> = {}): Project {
@@ -71,6 +77,32 @@ describe('state store', () => {
     expect(readState(file)).toEqual(DEFAULT_STATE);
   });
 
+  it('keeps the previous state as a backup and leaves no temp file behind', () => {
+    writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'old' })] }, file);
+    writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'new' })] }, file);
+    expect(readState(file).projects.map((p) => p.id)).toEqual(['new']);
+    expect(JSON.parse(fs.readFileSync(`${file}.bak`, 'utf8')).projects[0].id).toBe('old');
+    expect(fs.readdirSync(dir).filter((f) => f.includes('.tmp-'))).toEqual([]);
+  });
+
+  it('recovers from the backup instead of starting empty when state.json is damaged', () => {
+    writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'kept' })] }, file);
+    writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'kept' })] }, file);
+    fs.writeFileSync(file, '{"projects": [', 'utf8'); // a write cut short
+    expect(readState(file).projects.map((p) => p.id)).toEqual(['kept']);
+    // The damaged file is set aside for recovery, not overwritten by the next save.
+    const aside = fs.readdirSync(dir).filter((f) => f.includes('.corrupt-'));
+    expect(aside).toHaveLength(1);
+    expect(fs.readFileSync(path.join(dir, aside[0]), 'utf8')).toBe('{"projects": [');
+  });
+
+  it('takes the backup when a crash left no state.json between the two renames', () => {
+    writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'kept' })] }, file);
+    writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'kept' })] }, file);
+    fs.rmSync(file);
+    expect(readState(file).projects.map((p) => p.id)).toEqual(['kept']);
+  });
+
   it('fills missing settings from defaults', () => {
     fs.writeFileSync(file, JSON.stringify({ projects: [] }), 'utf8');
     expect(readState(file)).toEqual(DEFAULT_STATE);
@@ -103,6 +135,7 @@ describe('state store', () => {
 
   it('registers linked project roots for the path guards on read and write', () => {
     const linked = project({ id: 'p2', localPath: '/Users/pm/code/shop', mode: 'linked' });
+    approveLinkedRoot('/Users/pm/code/shop'); // what linkProject does
     writeState({ ...structuredClone(DEFAULT_STATE), projects: [linked] }, file);
     expect(isLinkedPath('/Users/pm/code/shop/api')).toBe(true);
 
@@ -110,6 +143,24 @@ describe('state store', () => {
     readState(file);
     expect(isLinkedPath('/Users/pm/code/shop/api')).toBe(true);
     expect(isLinkedPath('/Users/pm/code/other')).toBe(false);
+  });
+
+  it('refuses to save a linked folder the main process never linked', () => {
+    // Renderer code saving this used to make every path guard pass for the disk.
+    const rogue = project({ id: 'p3', localPath: '/', mode: 'linked' });
+    expect(() =>
+      writeState({ ...structuredClone(DEFAULT_STATE), projects: [rogue] }, file)
+    ).toThrow(/did not link/);
+    expect(isLinkedPath('/etc/passwd')).toBe(false);
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it('trusts the linked folders already on disk when the app starts', () => {
+    const linked = project({ id: 'p2', localPath: '/Users/pm/code/shop', mode: 'linked' });
+    fs.writeFileSync(file, JSON.stringify({ projects: [linked] }), 'utf8');
+    resetLinkedRootApprovals();
+    const state = readState(file);
+    expect(() => writeState(state, file)).not.toThrow();
   });
 });
 

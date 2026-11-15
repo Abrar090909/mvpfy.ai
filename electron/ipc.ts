@@ -83,38 +83,69 @@ import { readState, writeState } from './services/store';
 import { checkForUpdates, installUpdate } from './services/updates';
 
 /** Controller layer: routes renderer IPC calls to the service modules. */
-export function registerIpc(): void {
-  ipcMain.handle('app-version', () => app.getVersion());
-  ipcMain.handle('cli-check', () => cliCheck());
-  ipcMain.handle('agent-models', (_ev, agent: 'claude' | 'codex') => agentModels(agent));
-  ipcMain.handle('read-state', () => readState());
-  ipcMain.handle('write-state', (_ev, state: MvpfyState) => writeState(state));
-  ipcMain.handle('keychain-get', (_ev, entry: string) => keychainGet(entry));
-  ipcMain.handle('keychain-set', (_ev, entry: string, value: string) => keychainSet(entry, value));
-  ipcMain.handle('open-external', (_ev, url: string) => {
+/**
+ * The workspace a renderer request names, resolved — or an error saying what
+ * was refused. Every handler that touches a project directory starts here:
+ * the same resolve-then-guard was written out in each of them, and the one
+ * that forgot it (repo file reads and writes) was the hole.
+ */
+function allowedWorkspace(requested: string, refusal: string): string {
+  const resolved = path.resolve(requested);
+  if (!isAllowedWorkspace(resolved)) throw new Error(refusal);
+  return resolved;
+}
+
+/**
+ * Registers every handler, each waiting on `ready` before it runs.
+ *
+ * `ready` is the user's environment (PATH, the login shell's variables) being
+ * resolved, which used to happen with spawnSync before the window existed.
+ * It now runs alongside the window opening, and anything that spawns a tool
+ * waits for it here — one gate, rather than a check in each handler that
+ * would be forgotten in the next one. Handlers are registered at once, so an
+ * early call waits instead of failing with "no handler registered".
+ */
+export function registerIpc(ready: Promise<unknown> = Promise.resolve()): void {
+  const handle = (
+    channel: string,
+    listener: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown // eslint-disable-line @typescript-eslint/no-explicit-any
+  ): void => {
+    ipcMain.handle(channel, async (event, ...args) => {
+      await ready;
+      return listener(event, ...args);
+    });
+  };
+  handle('app-version', () => app.getVersion());
+  handle('cli-check', () => cliCheck());
+  handle('agent-models', (_ev, agent: 'claude' | 'codex') => agentModels(agent));
+  handle('read-state', () => readState());
+  handle('write-state', (_ev, state: MvpfyState) => writeState(state));
+  handle('keychain-get', (_ev, entry: string) => keychainGet(entry));
+  handle('keychain-set', (_ev, entry: string, value: string) => keychainSet(entry, value));
+  handle('open-external', (_ev, url: string) => {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
       throw new Error('Only http(s) URLs can be opened');
     }
     return shell.openExternal(url);
   });
-  ipcMain.handle('service-env', (_ev, workspacePath: string, linked: boolean, service: string) =>
+  handle('service-env', (_ev, workspacePath: string, linked: boolean, service: string) =>
     runningEnv(workspacePath, linked, service)
   );
-  ipcMain.handle('add-repos', (_ev, workspacePath: string, repoUrls: string[]) =>
+  handle('add-repos', (_ev, workspacePath: string, repoUrls: string[]) =>
     addRepositories(workspacePath, repoUrls)
   );
-  ipcMain.handle('discover-repos', (_ev, workspacePath: string, knownDirs: string[]) =>
+  handle('discover-repos', (_ev, workspacePath: string, knownDirs: string[]) =>
     discoverRepositories(workspacePath, knownDirs)
   );
-  ipcMain.handle('create-project', (_ev, repoUrls: string[], link?: boolean) =>
+  handle('create-project', (_ev, repoUrls: string[], link?: boolean) =>
     link ? linkProject(repoUrls[0] ?? '') : createProject(repoUrls)
   );
-  ipcMain.handle('create-blank-project', (_ev, name: string, remote: BlankProjectRemote) =>
+  handle('create-blank-project', (_ev, name: string, remote: BlankProjectRemote) =>
     createBlankProject(name, remote)
   );
-  ipcMain.handle('workspace-empty', (_ev, dirs: string[]) => workspaceIsEmpty(dirs));
-  ipcMain.handle('pick-directory', async () => {
+  handle('workspace-empty', (_ev, dirs: string[]) => workspaceIsEmpty(dirs));
+  handle('pick-directory', async () => {
     // multiSelections: a project is often several repos side by side, so let
     // the user pick them all in one pass rather than reopening the dialog.
     const res = await dialog.showOpenDialog({
@@ -123,39 +154,38 @@ export function registerIpc(): void {
     });
     return res.canceled ? [] : res.filePaths;
   });
-  ipcMain.handle('delete-project', (_ev, workspacePath: string) => deleteProject(workspacePath));
-  ipcMain.handle('run-agent', (_ev, req: RunAgentRequest) => runAgent(req));
-  ipcMain.handle('stop-run', (_ev, runId: string) => stopRun(runId));
-  ipcMain.handle(
-    'docker-compose',
-    (_ev, runId: string, repoPath: string, action: ComposeAction) => {
-      const resolved = path.resolve(repoPath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('docker compose is restricted to managed and linked project directories');
-      }
-      const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
-      startRun(runId, composeCommand(action, linked), resolved);
-    }
+  handle('delete-project', (_ev, workspacePath: string, projectKey?: string) =>
+    deleteProject(workspacePath, projectKey)
   );
-  ipcMain.handle('restart-service', (_ev, runId: string, repoPath: string, service: string) => {
-    const resolved = path.resolve(repoPath);
-    if (!isAllowedWorkspace(resolved)) {
-      throw new Error('docker compose is restricted to managed and linked project directories');
-    }
+  handle('run-agent', (_ev, req: RunAgentRequest) => runAgent(req));
+  handle('stop-run', (_ev, runId: string) => stopRun(runId));
+  handle('docker-compose', (_ev, runId: string, repoPath: string, action: ComposeAction) => {
+    const resolved = allowedWorkspace(
+      repoPath,
+      'docker compose is restricted to managed and linked project directories'
+    );
+    const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
+    startRun(runId, composeCommand(action, linked), resolved);
+  });
+  handle('restart-service', (_ev, runId: string, repoPath: string, service: string) => {
+    const resolved = allowedWorkspace(
+      repoPath,
+      'docker compose is restricted to managed and linked project directories'
+    );
     const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
     startRun(runId, restartServiceCommand(service, linked), resolved);
   });
-  ipcMain.handle(
+  handle(
     'ide',
     (_ev, runId: string, workspacePath: string, action: 'up' | 'down', port?: number) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('IDE containers are restricted to managed and linked project directories');
-      }
+      const resolved = allowedWorkspace(
+        workspacePath,
+        'IDE containers are restricted to managed and linked project directories'
+      );
       startRun(runId, ideCommand(resolved, action, port), resolved);
     }
   );
-  ipcMain.handle('migrate', (_ev, runId: string, workspacePath: string, repos: string[]) => {
+  handle('migrate', (_ev, runId: string, workspacePath: string, repos: string[]) => {
     const resolved = path.resolve(workspacePath);
     if (
       !isAllowedWorkspace(resolved) ||
@@ -171,57 +201,55 @@ export function registerIpc(): void {
     const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
     startRun(runId, migrationCommandFor(resolved, linked, repos), resolved);
   });
-  ipcMain.handle('seed', (_ev, runId: string, workspacePath: string) => {
-    const resolved = path.resolve(workspacePath);
-    if (!isAllowedWorkspace(resolved)) {
-      throw new Error('Seeding is restricted to managed and linked project directories');
-    }
+  handle('seed', (_ev, runId: string, workspacePath: string) => {
+    const resolved = allowedWorkspace(
+      workspacePath,
+      'Seeding is restricted to managed and linked project directories'
+    );
     const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
     const command = seedCommandFor(resolved, linked);
     if (!command) return false;
     startRun(runId, command, resolved);
     return true;
   });
-  ipcMain.handle('compose-status', (_ev, workspacePath: string) => {
-    const resolved = path.resolve(workspacePath);
-    if (!isAllowedWorkspace(resolved)) {
-      throw new Error('docker compose is restricted to managed and linked project directories');
-    }
+  handle('compose-status', (_ev, workspacePath: string) => {
+    const resolved = allowedWorkspace(
+      workspacePath,
+      'docker compose is restricted to managed and linked project directories'
+    );
     const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
     return composeStatus(resolved, linked);
   });
-  ipcMain.handle('compose-progress', (_ev, workspacePath: string) => {
-    const resolved = path.resolve(workspacePath);
-    if (!isAllowedWorkspace(resolved)) {
-      throw new Error('docker compose is restricted to managed and linked project directories');
-    }
+  handle('compose-progress', (_ev, workspacePath: string) => {
+    const resolved = allowedWorkspace(
+      workspacePath,
+      'docker compose is restricted to managed and linked project directories'
+    );
     const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
     return composeProgress(resolved, linked);
   });
-  ipcMain.handle('ide-status', (_ev, workspacePath: string) => {
-    const resolved = path.resolve(workspacePath);
-    if (!isAllowedWorkspace(resolved)) {
-      throw new Error('IDE containers are restricted to managed and linked project directories');
-    }
+  handle('ide-status', (_ev, workspacePath: string) => {
+    const resolved = allowedWorkspace(
+      workspacePath,
+      'IDE containers are restricted to managed and linked project directories'
+    );
     return ideStatus(resolved);
   });
-  ipcMain.handle('read-repo-files', (_ev, repoPath: string, relativePaths: string[]) =>
+  handle('read-repo-files', (_ev, repoPath: string, relativePaths: string[]) =>
     readRepoFiles(repoPath, relativePaths)
   );
-  ipcMain.handle(
-    'write-repo-file',
-    (_ev, repoPath: string, relativePath: string, content: string) =>
-      writeRepoFile(repoPath, relativePath, content)
+  handle('write-repo-file', (_ev, repoPath: string, relativePath: string, content: string) =>
+    writeRepoFile(repoPath, relativePath, content)
   );
-  ipcMain.handle('repo-branches', (_ev, dirs: string[]) => readRepoBranches(dirs));
-  ipcMain.handle('repo-remotes', (_ev, dirs: string[]) => readRepoRemotes(dirs));
-  ipcMain.handle('delete-feature', (_ev, workspacePath: string, configDir: string, slug: string) =>
+  handle('repo-branches', (_ev, dirs: string[]) => readRepoBranches(dirs));
+  handle('repo-remotes', (_ev, dirs: string[]) => readRepoRemotes(dirs));
+  handle('delete-feature', (_ev, workspacePath: string, configDir: string, slug: string) =>
     deleteFeatureFiles(workspacePath, configDir, slug)
   );
-  ipcMain.handle('pr-states', (_ev, urls: string[]) => pullRequestStates(urls));
+  handle('pr-states', (_ev, urls: string[]) => pullRequestStates(urls));
   // Read-only and local: what this machine can run a phone app on.
-  ipcMain.handle('simulators', () => simulatorTargets());
-  ipcMain.handle('pick-images', async () => {
+  handle('simulators', () => simulatorTargets());
+  handle('pick-images', async () => {
     const res = await dialog.showOpenDialog({
       properties: ['openFile', 'multiSelections'],
       message: 'Choose the design for this feature',
@@ -229,55 +257,52 @@ export function registerIpc(): void {
     });
     return res.canceled ? [] : res.filePaths;
   });
-  ipcMain.handle(
+  handle(
     'add-design',
     (_ev, workspacePath: string, configDir: string, slug: string, sources: string[]) =>
       addDesignImages(workspacePath, configDir, slug, sources)
   );
-  ipcMain.handle(
+  handle(
     'remove-design',
     (_ev, workspacePath: string, configDir: string, slug: string, name: string) =>
       removeDesignImage(workspacePath, configDir, slug, name)
   );
-  ipcMain.handle(
+  handle(
     'read-design',
     (_ev, workspacePath: string, configDir: string, slug: string, name: string) =>
       readDesignImage(workspacePath, configDir, slug, name)
   );
-  ipcMain.handle(
+  handle(
     'design-paths',
     (_ev, workspacePath: string, configDir: string, slug: string, names: string[]) =>
       designImagePaths(workspacePath, configDir, slug, names)
   );
-  ipcMain.handle('can-share', () => hasCloudflared());
-  ipcMain.handle(
+  handle('can-share', () => hasCloudflared());
+  handle(
     'start-share',
     (_ev, runId: string, workspacePath: string, port: number, hostHeader?: string) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Sharing is restricted to managed and linked project directories');
-      }
+      const resolved = allowedWorkspace(
+        workspacePath,
+        'Sharing is restricted to managed and linked project directories'
+      );
       startRun(runId, tunnelCommand(port, hostHeader ?? ''), resolved);
     }
   );
-  ipcMain.handle(
-    'add-remote',
-    (_ev, runId: string, workspacePath: string, dir: string, url: string) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Remotes can only be set on managed and linked project directories');
-      }
-      startRun(runId, addRemoteCommand(dir, url), resolved);
-    }
-  );
-  ipcMain.handle('repo-sync', (_ev, runId: string, workspacePath: string, dirs: string[]) => {
-    const resolved = path.resolve(workspacePath);
-    if (!isAllowedWorkspace(resolved)) {
-      throw new Error('Sync is restricted to managed and linked project directories');
-    }
+  handle('add-remote', (_ev, runId: string, workspacePath: string, dir: string, url: string) => {
+    const resolved = allowedWorkspace(
+      workspacePath,
+      'Remotes can only be set on managed and linked project directories'
+    );
+    startRun(runId, addRemoteCommand(dir, url), resolved);
+  });
+  handle('repo-sync', (_ev, runId: string, workspacePath: string, dirs: string[]) => {
+    const resolved = allowedWorkspace(
+      workspacePath,
+      'Sync is restricted to managed and linked project directories'
+    );
     startRun(runId, repoSyncCommand(dirs), resolved);
   });
-  ipcMain.handle(
+  handle(
     'feature-git-status',
     (
       _ev,
@@ -287,14 +312,14 @@ export function registerIpc(): void {
       featureSlug: string,
       branch: string
     ) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Reading is restricted to managed and linked project directories');
-      }
+      allowedWorkspace(
+        workspacePath,
+        'Reading is restricted to managed and linked project directories'
+      );
       return featureGitStatus(dirs, projectKey, featureSlug, branch);
     }
   );
-  ipcMain.handle(
+  handle(
     'commit-feature-work',
     (
       _ev,
@@ -306,18 +331,17 @@ export function registerIpc(): void {
       branch: string,
       message: string
     ) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Committing is restricted to managed and linked project directories');
-      }
-      startRun(
-        runId,
-        commitFeatureWorkCommand(dirs, projectKey, featureSlug, branch, message),
-        resolved
+      const resolved = allowedWorkspace(
+        workspacePath,
+        'Committing is restricted to managed and linked project directories'
       );
+      const messageFile = path.join(TMP_DIR, `commit-message-${runId}.txt`);
+      const command = commitFeatureWorkCommand(dirs, projectKey, featureSlug, branch, messageFile);
+      fs.writeFileSync(messageFile, message, 'utf8');
+      startRun(runId, command, resolved, () => removeQuietly([messageFile]));
     }
   );
-  ipcMain.handle(
+  handle(
     'merge-trunk',
     (
       _ev,
@@ -329,10 +353,10 @@ export function registerIpc(): void {
       branch: string,
       onConflict: 'abort' | 'keep'
     ) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Merge is restricted to managed and linked project directories');
-      }
+      const resolved = allowedWorkspace(
+        workspacePath,
+        'Merge is restricted to managed and linked project directories'
+      );
       const command = mergeTrunkCommand(projectKey, featureSlug, dirs, branch, onConflict);
       // Nothing to merge is not a failure — the feature may have no checkout in
       // any repository yet. Still a run, so the caller settles either way.
@@ -343,13 +367,13 @@ export function registerIpc(): void {
       );
     }
   );
-  ipcMain.handle(
+  handle(
     'push-feature-branch',
     (_ev, runId: string, workspacePath: string, dirs: string[], branch: string) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Pushing is restricted to managed and linked project directories');
-      }
+      const resolved = allowedWorkspace(
+        workspacePath,
+        'Pushing is restricted to managed and linked project directories'
+      );
       const command = pushFeatureBranchCommand(dirs, branch);
       startRun(
         runId,
@@ -361,11 +385,11 @@ export function registerIpc(): void {
       );
     }
   );
-  ipcMain.handle('push-trunk', (_ev, runId: string, workspacePath: string, dirs: string[]) => {
-    const resolved = path.resolve(workspacePath);
-    if (!isAllowedWorkspace(resolved)) {
-      throw new Error('Pushing is restricted to managed and linked project directories');
-    }
+  handle('push-trunk', (_ev, runId: string, workspacePath: string, dirs: string[]) => {
+    const resolved = allowedWorkspace(
+      workspacePath,
+      'Pushing is restricted to managed and linked project directories'
+    );
     const command = pushTrunkCommand(dirs);
     startRun(
       runId,
@@ -374,11 +398,11 @@ export function registerIpc(): void {
       resolved
     );
   });
-  ipcMain.handle('auto-merge-prs', (_ev, runId: string, workspacePath: string, urls: string[]) => {
-    const resolved = path.resolve(workspacePath);
-    if (!isAllowedWorkspace(resolved)) {
-      throw new Error('Merging is restricted to managed and linked project directories');
-    }
+  handle('auto-merge-prs', (_ev, runId: string, workspacePath: string, urls: string[]) => {
+    const resolved = allowedWorkspace(
+      workspacePath,
+      'Merging is restricted to managed and linked project directories'
+    );
     const command = autoMergeCommand(urls);
     startRun(
       runId,
@@ -386,17 +410,17 @@ export function registerIpc(): void {
       resolved
     );
   });
-  ipcMain.handle(
+  handle(
     'feature-conflicts',
     (_ev, workspacePath: string, dirs: string[], projectKey: string, featureSlug: string) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Reading is restricted to managed and linked project directories');
-      }
+      allowedWorkspace(
+        workspacePath,
+        'Reading is restricted to managed and linked project directories'
+      );
       return featureConflicts(dirs, projectKey, featureSlug);
     }
   );
-  ipcMain.handle(
+  handle(
     'finish-merge',
     (
       _ev,
@@ -408,10 +432,10 @@ export function registerIpc(): void {
       branch: string,
       mode: 'commit' | 'abort'
     ) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Merge is restricted to managed and linked project directories');
-      }
+      const resolved = allowedWorkspace(
+        workspacePath,
+        'Merge is restricted to managed and linked project directories'
+      );
       // The guards live in the command builder, which reads git before it
       // writes anything; a refusal reaches the caller as a thrown error rather
       // than as a run that failed halfway.
@@ -423,7 +447,7 @@ export function registerIpc(): void {
       );
     }
   );
-  ipcMain.handle(
+  handle(
     'raise-pr',
     (
       _ev,
@@ -434,10 +458,10 @@ export function registerIpc(): void {
       title: string,
       body: string
     ) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Pull requests are restricted to managed and linked project directories');
-      }
+      const resolved = allowedWorkspace(
+        workspacePath,
+        'Pull requests are restricted to managed and linked project directories'
+      );
       // The body goes to disk rather than onto the command line: it is many
       // lines, and a newline inside a quoted argument ends the command on
       // cmd.exe. Built first — a raise with nothing to push throws here, and
@@ -449,7 +473,7 @@ export function registerIpc(): void {
       startRun(runId, command, resolved, () => removeQuietly([bodyFile]));
     }
   );
-  ipcMain.handle(
+  handle(
     'worktree',
     (
       _ev,
@@ -460,54 +484,51 @@ export function registerIpc(): void {
       branch: string,
       action: 'add' | 'remove'
     ) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Worktrees are restricted to managed and linked project directories');
-      }
+      allowedWorkspace(
+        workspacePath,
+        'Worktrees are restricted to managed and linked project directories'
+      );
       return action === 'add'
         ? addWorktrees(projectKey, featureSlug, dirs, branch)
         : removeWorktrees(projectKey, featureSlug, dirs);
     }
   );
-  ipcMain.handle(
+  handle(
     'checkout-feature',
     (_ev, workspacePath: string, dirs: string[], branch: string | null) => {
-      const resolved = path.resolve(workspacePath);
-      if (!isAllowedWorkspace(resolved)) {
-        throw new Error('Checkout is restricted to managed and linked project directories');
-      }
+      allowedWorkspace(
+        workspacePath,
+        'Checkout is restricted to managed and linked project directories'
+      );
       return checkoutFeature(dirs, branch);
     }
   );
-  ipcMain.handle('feature-checked-out', (_ev, dirs: string[], branch: string) =>
+  handle('feature-checked-out', (_ev, dirs: string[], branch: string) =>
     featureCheckedOut(dirs, branch)
   );
-  ipcMain.handle('cli-login', (_ev, runId: string, tool: string) =>
+  handle('cli-login', (_ev, runId: string, tool: string) =>
     startRun(runId, loginCommand(tool), TMP_DIR)
   );
-  ipcMain.handle('sign-in-all', (_ev, runId: string, tools: string[]) =>
+  handle('sign-in-all', (_ev, runId: string, tools: string[]) =>
     startRun(runId, signInAllCommand(tools), TMP_DIR)
   );
-  ipcMain.handle(
-    'mcp-register',
-    (_ev, runId: string, name: string, url: string, agent: AgentKind) => {
-      const parsed = new URL(url);
-      if (parsed.protocol !== 'https:') throw new Error('Only https MCP servers can be registered');
-      ensureDirs();
-      return new Promise<void>((resolve, reject) => {
-        startRun(runId, mcpAddCommand(name, url, agent), TMP_DIR, (code) => {
-          if (code === 0) resolve();
-          else
-            reject(
-              new Error(
-                `Could not register Feature1 in ${agent}. Check that its CLI is installed and retry.`
-              )
-            );
-        });
+  handle('mcp-register', (_ev, runId: string, name: string, url: string, agent: AgentKind) => {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') throw new Error('Only https MCP servers can be registered');
+    ensureDirs();
+    return new Promise<void>((resolve, reject) => {
+      startRun(runId, mcpAddCommand(name, url, agent), TMP_DIR, (code) => {
+        if (code === 0) resolve();
+        else
+          reject(
+            new Error(
+              `Could not register Feature1 in ${agent}. Check that its CLI is installed and retry.`
+            )
+          );
       });
-    }
-  );
-  ipcMain.handle('open-terminal', (_ev, workspacePath: string) => {
+    });
+  });
+  handle('open-terminal', (_ev, workspacePath: string) => {
     const resolved = path.resolve(workspacePath);
     // A feature's checkout is somewhere mvpfy made, under the worktrees
     // directory it owns outright — not a project directory, so the
@@ -520,19 +541,19 @@ export function registerIpc(): void {
     // Detached and unwatched: it is the user's shell now, not a run of ours.
     spawnShell(openTerminalCommand(resolved), { cwd: resolved, detached: true }).unref();
   });
-  ipcMain.handle('install-plans', () => installPlans());
-  ipcMain.handle('install-all', (_ev, runId: string, tools: string[]) =>
+  handle('install-plans', () => installPlans());
+  handle('install-all', (_ev, runId: string, tools: string[]) =>
     startRun(runId, installAllCommand(tools), TMP_DIR)
   );
   // Installing the tooling has no project behind it — it is what happens
   // before there is one.
-  ipcMain.handle('install-tools-agent', (_ev, req: RunAgentRequest) => runToolingAgent(req));
-  ipcMain.handle('install-tool', (_ev, runId: string, tool: string) =>
+  handle('install-tools-agent', (_ev, req: RunAgentRequest) => runToolingAgent(req));
+  handle('install-tool', (_ev, runId: string, tool: string) =>
     startRun(runId, installCommand(tool), TMP_DIR)
   );
-  ipcMain.handle('find-free-port', (_ev, start: number) => findFreePort(start));
-  ipcMain.handle('probe-url', (_ev, url: string) => probeUrl(url));
-  ipcMain.handle('mcp-fetch', (_ev, req: McpFetchRequest) => mcpFetch(req));
-  ipcMain.handle('check-for-updates', () => checkForUpdates());
-  ipcMain.handle('install-update', () => installUpdate());
+  handle('find-free-port', (_ev, start: number) => findFreePort(start));
+  handle('probe-url', (_ev, url: string) => probeUrl(url));
+  handle('mcp-fetch', (_ev, req: McpFetchRequest) => mcpFetch(req));
+  handle('check-for-updates', () => checkForUpdates());
+  handle('install-update', () => installUpdate());
 }
