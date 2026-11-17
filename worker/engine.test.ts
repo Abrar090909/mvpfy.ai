@@ -585,3 +585,55 @@ describe('the summary a product manager reads', () => {
     expect(h.transport.progressCalls.at(-1)?.body.message).toMatch(/all 1 check passed/);
   });
 });
+
+describe('a credential the agent left in the checkout', () => {
+  it('publishes the work instead of failing the execution', async () => {
+    // The regression this guards: `changedPaths` withheld an untracked
+    // .env, but `hasUncommittedChanges` asked git again without the filter,
+    // still saw it, and decided work had been left behind — so the publish
+    // step failed the whole execution on exactly the case the withholding
+    // exists for. Worse than committing the secret, which is what it had
+    // replaced: no pull request at all.
+    const { claimed, checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    h.git.secrets.set(IDS.repoApi, ['.env']);
+
+    const ending = await h.engine.run(checkpoint, never);
+
+    expect(ending).toBe('ready_for_testing');
+    expect(h.prs.creates).toHaveLength(1);
+    expect(h.transport.resultsOf(claimed.id)[IDS.repoApi].outcome).toBe('pr_created');
+  });
+
+  it('says which files it left out, rather than skipping them silently', async () => {
+    // A file skipped on somebody's behalf is a decision they should see;
+    // otherwise the agent's work simply appears to be missing.
+    const { checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    h.git.secrets.set(IDS.repoApi, ['.env', 'secrets/key.pem']);
+
+    await h.engine.run(checkpoint, never);
+
+    const summary = h.transport.progressCalls.at(-1)?.body.message ?? '';
+    expect(summary).toMatch(/2 files left out for looking like credentials/);
+    expect(summary).toContain('.env');
+    expect(
+      h.store.load(checkpoint.execution.tenant_id, checkpoint.execution.id)?.repositories[0]
+        .withheld
+    ).toContain('.env');
+  });
+
+  it('still refuses to publish when real work was left uncommitted', async () => {
+    // The guard must keep doing its job: this is genuine work that never
+    // reached the branch, not a withheld secret.
+    const { checkpoint } = await start(standaloneStoryExecution());
+    agentChanges(h, IDS.repoApi);
+    h.git.leavesDirt.add(IDS.repoApi);
+
+    const ending = await h.engine.run(checkpoint, never);
+
+    expect(ending).toBe('failed');
+    expect(h.git.pushes).toHaveLength(0);
+    expect(h.transport.progressCalls.at(-1)?.body.message).toMatch(/left uncommitted/);
+  });
+});

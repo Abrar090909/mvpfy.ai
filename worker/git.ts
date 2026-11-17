@@ -199,8 +199,11 @@ export class Git {
   }
 
   /** True when the checkout holds changes nobody has committed. */
+  /**
+   * Work that never reached the branch. A withheld credential is not work.
+   */
   async hasUncommittedChanges(dir: string): Promise<boolean> {
-    return (await this.git(dir, 'status --porcelain')).trim().length > 0;
+    return (await this.uncommitted(dir)).paths.length > 0;
   }
 
   /** Commits on this branch that are not in the base commit. */
@@ -246,9 +249,24 @@ export class Git {
    * Everything the agent changed or added, as paths git will take — less any
    * new file that looks like a credential (see parseStatus).
    */
-  async changedPaths(dir: string): Promise<string[]> {
+  /**
+   * Everything the agent left behind, split into what may be committed and
+   * what is being withheld because it looks like a credential.
+   *
+   * One reader, because there used to be two and they disagreed. This one
+   * withheld an untracked `.env`; `hasUncommittedChanges` asked git again
+   * without the filter and still saw it, so the publish step decided work
+   * had been left behind and failed the whole execution — on exactly the
+   * case the withholding exists for. A secret that is skipped must not also
+   * look like unfinished work.
+   */
+  async uncommitted(dir: string): Promise<{ paths: string[]; withheld: string[] }> {
     const out = await this.git(dir, 'status --porcelain=v1 -z --untracked-files=all');
-    return parseStatus(out).paths;
+    return parseStatus(out);
+  }
+
+  async changedPaths(dir: string): Promise<string[]> {
+    return (await this.uncommitted(dir)).paths;
   }
 
   /**

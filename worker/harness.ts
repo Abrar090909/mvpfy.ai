@@ -29,6 +29,8 @@ const SHA = (seed: string): string => seed.repeat(40).slice(0, 40);
 export class FakeGit {
   /** repositoryId → what the agent left uncommitted in it. */
   changes = new Map<string, string[]>();
+  /** Untracked files withheld for looking like credentials. */
+  secrets = new Map<string, string[]>();
   /** repositoryId → HEAD, when the branch has moved off the base commit. */
   heads = new Map<string, string>();
   /** Repositories where committing will not work. */
@@ -92,6 +94,11 @@ export class FakeGit {
   /** The branch tip: the base until something commits, whoever commits it. */
   async headCommit(dir: string): Promise<string> {
     return this.heads.get(this.idOf(dir)) ?? this.base;
+  }
+
+  async uncommitted(dir: string): Promise<{ paths: string[]; withheld: string[] }> {
+    const id = this.idOf(dir);
+    return { paths: this.changes.get(id) ?? [], withheld: this.secrets.get(id) ?? [] };
   }
 
   async hasUncommittedChanges(dir: string): Promise<boolean> {
