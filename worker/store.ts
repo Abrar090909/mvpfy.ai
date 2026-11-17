@@ -38,6 +38,8 @@ export interface RepositoryCheckpoint {
     exitCode: number | null;
     reason?: string;
   }>;
+  /** Files not committed because they look like credentials. */
+  withheld?: string[];
   outcome: RepositoryOutcome | null;
   /** Accepted by Feature1, so a resumed attempt does not re-send it. */
   reported: boolean;

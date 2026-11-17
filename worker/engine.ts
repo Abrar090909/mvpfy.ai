@@ -383,7 +383,17 @@ export class ExecutionEngine {
     for (const [repositoryId, tree] of Object.entries(worktrees)) {
       const row = this.deps.store.repository(checkpoint, repositoryId);
       try {
-        const paths = await this.deps.git.changedPaths(tree);
+        const { paths, withheld } = await this.deps.git.uncommitted(tree);
+        // Said out loud. A file skipped for looking like a credential is a
+        // decision somebody should know was made on their behalf — silently
+        // leaving it out is how an agent's work appears to be missing.
+        if (withheld.length > 0) {
+          row.withheld = [...new Set([...(row.withheld ?? []), ...withheld])];
+          this.log(
+            `${repositoryId}: not committing ${withheld.length} file(s) that look like ` +
+              `credentials — ${withheld.join(', ')}`
+          );
+        }
         if (paths.length === 0) continue;
         const sha = await this.deps.git.commit(
           tree,
@@ -574,6 +584,7 @@ export class ExecutionEngine {
     const rows = checkpoint.repositories;
     const opened = rows.filter((r) => r.pullRequestUrl).length;
     const untouched = rows.filter((r) => r.outcome === 'no_changes').length;
+    const withheld = [...new Set(rows.flatMap((r) => r.withheld ?? []))];
     const checks = rows.flatMap((r) => r.checks);
     const ran = checks.filter((c) => c.outcome === 'passed').length;
     const missed = checks.filter((c) => c.outcome !== 'passed');
@@ -584,6 +595,12 @@ export class ExecutionEngine {
         ? `all ${ran} check${ran === 1 ? '' : 's'} passed`
         : `${ran} check${ran === 1 ? '' : 's'} passed, ${missed.length} could not run ` +
           `(${[...new Set(missed.map((c) => c.name))].join(', ')})`,
+      ...(withheld.length > 0
+        ? [
+            `${withheld.length} file${withheld.length === 1 ? '' : 's'} left out for looking ` +
+              `like credentials (${withheld.join(', ')})`,
+          ]
+        : []),
     ].join('; ');
   }
 
