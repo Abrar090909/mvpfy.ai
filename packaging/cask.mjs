@@ -45,11 +45,12 @@ cask "${CASK_TOKEN}" do
 
   app "${APP_BUNDLE}"
 
-  # Nothing here clears the quarantine flag. These builds are unsigned, so
-  # macOS will refuse the first launch, and a cask could strip that flag in a
-  # postflight — but disabling Gatekeeper on someone's behalf, as a side effect
-  # of an install they thought was routine, is not ours to decide. The install
-  # instructions offer --no-quarantine so it stays the user's own choice.
+  # No postflight, and now nothing for one to do: the app is signed with a
+  # Developer ID certificate and notarized, so the quarantine flag resolves on
+  # its own and the first launch is an ordinary one. A cask that stripped that
+  # flag would be disabling Gatekeeper as a side effect of an install someone
+  # thought was routine, which was never ours to decide even when these builds
+  # were unsigned and it would have been convenient.
 
   # Deliberately not ~/.mvpfy: that is where projects, worktrees and their
   # uncommitted work live. Uninstalling the app must not be able to delete

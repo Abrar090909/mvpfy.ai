@@ -19,6 +19,9 @@
     "worker": "npm run build:worker && node dist-worker/worker/index.js",
     "package": "npm run build && electron-builder --mac --dir",
     "package:all": "npm run build && electron-builder --mac --win --linux",
+    "sign:preflight": "node scripts/sign-preflight.mjs",
+    "sign:verify": "node scripts/verify-signing.mjs",
+    "release:mac": "node scripts/sign-preflight.mjs --release && npm run build && electron-builder --mac && node scripts/verify-signing.mjs",
     "test": "vitest run",
     "test:codex": "npm run build:electron && node scripts/test-codex.mjs",
     "lint": "eslint . && prettier --check \"{src,electron,shared,worker}/**/*.{ts,tsx}\"",
@@ -79,6 +82,13 @@
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.icns",
       "artifactName": "mvpfy-by-feature1-${version}.${ext}",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true,
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "mvpfy opens Terminal to run install commands and long-running tools where you can watch them and answer their prompts."
+      },
       "target": [
         {
           "target": "dmg",

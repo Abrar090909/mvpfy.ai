@@ -20,10 +20,12 @@ describe('renderCask', () => {
   });
 
   it('never clears the quarantine flag on the user behalf', () => {
-    // An unsigned build is refused by macOS on first launch. Stripping the
-    // flag from a postflight would fix that silently, which is exactly why it
-    // is not here: --no-quarantine stays the installer's own decision.
-    expect(renderCask({ version: '1.0.0', sha256: SHA })).not.toMatch(/postflight do/);
+    // The builds are signed and notarized, so there is nothing to clear — and
+    // a postflight that turned Gatekeeper off as a side effect of a routine
+    // install would be wrong even if there were.
+    const cask = renderCask({ version: '1.0.0', sha256: SHA });
+    expect(cask).not.toMatch(/postflight do/);
+    expect(cask).not.toMatch(/quarantine: false|xattr/);
   });
 
   it('will not zap the directory holding people code', () => {

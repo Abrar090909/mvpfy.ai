@@ -9,19 +9,23 @@ const RECHECK_MS = 3 * 60 * 60_000;
 /**
  * Auto-updates from GitHub Releases.
  *
- * Windows (NSIS) and Linux (AppImage) need nothing from the user: the update
- * downloads in the background and installs the next time the app is quit. The
- * banner offering a restart is a way to have it sooner, not a step.
+ * Every platform now needs nothing from the user: the update downloads in the
+ * background and installs the next time the app is quit. The banner offering a
+ * restart is a way to have it sooner, not a step.
  *
- * macOS only notifies, because Squirrel refuses to apply an update it cannot
- * verify and these builds are unsigned — turning autoDownload on there would
- * download something that then fails to install. Signing the app makes macOS
- * behave like the others through this same code, changing one line.
+ * macOS used to only notify, because Squirrel refuses to apply an update it
+ * cannot verify and the builds were unsigned. They are signed and notarized
+ * now, which is what lets the line below stop treating it as a special case.
+ *
+ * One upgrade cannot work this way and no code here can fix it: moving from an
+ * unsigned build to a signed one. Squirrel checks that the update's signature
+ * matches the running app's, and an unsigned app has none to match, so anyone
+ * on a build from before signing has to download that one release by hand.
  */
 export function initAutoUpdates(send: (status: UpdateStatus) => void): void {
   if (!app.isPackaged) return;
   autoUpdater.allowPrerelease = true;
-  autoUpdater.autoDownload = process.platform !== 'darwin';
+  autoUpdater.autoDownload = true;
   // Explicit rather than relying on the default: this is the line that makes
   // updating hands-off, so it should be visible.
   autoUpdater.autoInstallOnAppQuit = true;

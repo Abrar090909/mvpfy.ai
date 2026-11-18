@@ -136,6 +136,43 @@ npm run build      # typecheck + build renderer and main/preload
 npm run package    # package the macOS app into release/
 ```
 
+### Signing and notarizing a macOS release
+
+A Mac refuses a downloaded app that is not signed with a Developer ID certificate *and*
+notarized by Apple, and neither failure is visible on the machine that built it — the
+strict check only runs on a file that arrived with a quarantine flag. So the build refuses
+to start without working credentials, and checks the result afterwards.
+
+One-time setup, with an Apple Developer Program membership:
+
+1. **Certificate.** At [Certificates](https://developer.apple.com/account/resources/certificates),
+   create a **Developer ID Application** certificate (Keychain Access → Certificate
+   Assistant → Request a Certificate From a Certificate Authority gives you the CSR), then
+   double-click the download to install it. An *Apple Development* certificate is a
+   different thing and cannot ship.
+2. **Notarization credentials.** Create an app-specific password at
+   [appleid.apple.com](https://appleid.apple.com), then store it once:
+
+   ```sh
+   xcrun notarytool store-credentials mvpfy-notary \
+     --apple-id "you@example.com" --team-id "YOURTEAMID" --password "xxxx-xxxx-xxxx-xxxx"
+   ```
+
+3. **Point the build at it:** `export APPLE_KEYCHAIN_PROFILE=mvpfy-notary`.
+
+Then every release:
+
+```sh
+npm run sign:preflight -- --release   # says what will happen, refuses if it would fail
+npm run release:mac                   # preflight, build, sign, notarize, verify
+npm run sign:verify                   # re-check a build on its own
+```
+
+Pass `APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER` instead of a keychain profile on
+a machine with no keychain, such as CI. `APPLE_ID` and `APPLE_APP_SPECIFIC_PASSWORD` on
+their own do not work — electron-builder does not pass a team ID with them — and the
+preflight says so rather than letting the build discover it at the end.
+
 ## How it works
 
 1. **Add project** — paste one or more GitHub/GitLab repo URLs (one per line for multi-repo
@@ -331,30 +368,30 @@ The curated prompts live in `src/prompts/`:
 - **Windows** — beta: commands run through `cmd.exe`, tools install through `winget`, and
   Docker Desktop must be running. The whole test suite runs on Windows in CI. Feedback welcome.
 
-Beta binaries are unsigned. On macOS, right-click → Open on first launch (or
-`xattr -dr com.apple.quarantine "/Applications/mvpfy by feature1.app"`).
+macOS builds are signed with a Developer ID certificate and notarized by Apple, so they
+open normally — no right-click → Open, no `xattr`. Windows builds are not signed yet, so
+SmartScreen will warn on first run.
 
 ## Installing
 
-Windows and Linux update themselves in the background. macOS cannot install an update it
-cannot verify, and these builds are unsigned — so on a Mac, Homebrew is the way to stay
-current:
+Every platform updates itself in the background: mvpfy downloads the new version and
+installs it the next time you quit. On a Mac you can also install through Homebrew, which
+keeps it alongside everything else you manage there:
 
 ```sh
-brew install --cask --no-quarantine feature1-ai/mvpfy/mvpfy
+brew install --cask feature1-ai/mvpfy/mvpfy
 brew upgrade --cask mvpfy
 ```
-
-`--no-quarantine` is what lets an unsigned app open without the right-click → Open dance.
-It is on the command line rather than inside the cask on purpose: turning off Gatekeeper
-should be something you chose, not something an install did to you. Leave it off and the
-app installs just the same — you clear the flag yourself on first launch.
 
 The tap is our own ([feature1-ai/homebrew-mvpfy](https://github.com/feature1-ai/homebrew-mvpfy)),
 because Homebrew's cask repository takes neither pre-release versions nor projects this
 small. Every release updates it automatically. Windows and Linux are downloads for now —
 they already update in place, and a package manager there would only disagree with the
 app about which version is installed.
+
+> **Upgrading from a build before v1.0.0-beta.51** — those were unsigned, and macOS will
+> not let a signed update replace an unsigned app. Download that one release by hand (or
+> `brew upgrade --cask mvpfy`); everything after it updates itself.
 
 ## Notes
 

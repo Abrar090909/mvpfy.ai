@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the hardened runtime, which notarization requires.
+
+  The hardened runtime is a set of things a signed process may no longer do
+  unless it says so here. Every key below is a thing mvpfy actually does: an
+  entitlement that is not needed is one more hole in the app, so none of these
+  are here for symmetry or by habit.
+
+  This file is used for the app and inherited by Electron's helper processes
+  (entitlementsInherit in package.json), because the renderer and GPU helpers
+  need the same JIT permissions the main process does.
+-->
+<plist version="1.0">
+<dict>
+  <!--
+    V8 compiles JavaScript to machine code at runtime and executes it. Without
+    these two the renderer is killed on launch — this is not a mvpfy choice,
+    it is what running a JavaScript engine means.
+  -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!--
+    mvpfy runs agents and tools as child processes through the user's own login
+    shell, so the environment their dotfiles set has to survive into them. That
+    is the whole point of going through a login shell: finding the same `claude`,
+    `codex`, `docker` and `git` the user finds in their own terminal.
+  -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+
+  <!--
+    Electron loads its own frameworks and the app's unpacked native modules from
+    inside the bundle. Library validation would require every one of them to
+    carry this app's team signature, which the prebuilt ones do not.
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!--
+    The one that is easy to miss, and that breaks a feature rather than the
+    whole app: mvpfy opens Terminal.app through AppleScript to run installs and
+    long-lived commands where the user can watch and answer them (see
+    electron/services/shell.ts and install.ts). Under the hardened runtime,
+    sending an Apple event to another application is denied without this, and
+    the failure is a silent errAEEventNotPermitted rather than a crash — so the
+    Terminal button would simply stop doing anything.
+
+    It also needs NSAppleEventsUsageDescription in Info.plist, set in
+    package.json, or macOS refuses before it even asks the user.
+  -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>
