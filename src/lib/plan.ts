@@ -133,7 +133,14 @@ export function slugForFeature(description: string, existing: string[]): string 
       .join('-')
       .replace(/-+/g, '-')
       .slice(0, 40)
-      .replace(/-$/, '') || 'feature';
+      // Both ends, and the leading one is not symmetry for its own sake: a
+      // slug becomes a path segment, and assertFeatureLocation requires one
+      // to start with a letter or digit — because a path beginning with `-`
+      // is read as a flag by the rm that deletes a feature's files. A
+      // description pasted from a bulleted list ("- add dark mode") produced
+      // exactly that, and the feature it made could be created but never
+      // deleted: every attempt threw "That is not a feature name".
+      .replace(/^-+|-+$/g, '') || 'feature';
   if (!existing.includes(base)) return base;
   let n = 2;
   while (existing.includes(`${base}-${n}`)) n++;

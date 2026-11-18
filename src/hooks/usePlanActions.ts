@@ -616,7 +616,14 @@ export function usePlanActions(ctx: ControllerContext): PlanActions {
       if (processedFailures.current.has(run.handle.runId)) continue;
       processedFailures.current.add(run.handle.runId);
       const slug = run.handle.planSlug ?? '';
-      forgetSession(slug);
+      // Only when the log says the conversation is the thing that went wrong.
+      // This used to fire for every failed run carrying a planSlug, and most
+      // of them say nothing about the agent's conversation at all — a push
+      // rejected, a migration that failed, `gh` not answering. Each of those
+      // threw away the feature's conversation, so the next story re-read the
+      // codebase from nothing: slower, dearer, and with none of what the
+      // agent had worked out so far.
+      if (lostConversation(run.log)) forgetSession(slug);
       // A story that asked to resume a conversation that does not exist has
       // not failed at anything — nothing was attempted. Forgetting the id and
       // making the person press the button again shows them an error about

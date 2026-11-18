@@ -259,3 +259,24 @@ describe('what the product manager asked for', () => {
     expect(plan as unknown as Record<string, unknown>).not.toHaveProperty('featureAsks');
   });
 });
+
+describe('slugForFeature leading punctuation', () => {
+  it('drops a leading hyphen, so a pasted bullet does not make an undeletable feature', () => {
+    // assertFeatureLocation requires a slug to start with a letter or digit,
+    // because a path beginning with `-` is read as a flag by the rm that
+    // deletes a feature's files. A slug that gets past creation and then
+    // fails that guard can never be deleted.
+    expect(slugForFeature('- add dark mode', [])).toBe('add-dark-mode');
+    expect(slugForFeature('-fix the login bug', [])).toBe('fix-the-login-bug');
+    expect(slugForFeature('--- whatever', [])).toBe('whatever');
+  });
+
+  it('still falls back when a description is nothing but punctuation', () => {
+    expect(slugForFeature('---', [])).toBe('feature');
+    expect(slugForFeature('!!!', [])).toBe('feature');
+  });
+
+  it('leaves an ordinary description alone', () => {
+    expect(slugForFeature('add dark mode', [])).toBe('add-dark-mode');
+  });
+});

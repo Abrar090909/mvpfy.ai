@@ -36,8 +36,34 @@ function retireBrokenCodexModel(settings: Settings): Settings {
 /** The previous good copy, kept by every write (see writeState). */
 const backupOf = (file: string): string => `${file}.bak`;
 
+/**
+ * Thrown when the bytes were read and are not state. Distinct from an OS
+ * error on the read itself, which says nothing about the file's content —
+ * see readState.
+ */
+class UnreadableState extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'UnreadableState';
+  }
+}
+
 function parseState(file: string): MvpfyState {
-  const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<MvpfyState>;
+  // Read and parse are separate on purpose: only the second can tell us the
+  // file is damaged. Reading throws for reasons that pass — a lock, a full
+  // descriptor table, a permission that is about to be granted.
+  const text = fs.readFileSync(file, 'utf8');
+  // Everything after the read: a parse failure, and equally a shape that
+  // parses and then breaks migration. Both mean the file's content is the
+  // problem, which is what earns setting it aside.
+  try {
+    return buildState(JSON.parse(text) as Partial<MvpfyState>);
+  } catch (error) {
+    throw new UnreadableState(error);
+  }
+}
+
+function buildState(parsed: Partial<MvpfyState>): MvpfyState {
   return {
     // Legacy shared-server connections have no client credential and are unsafe.
     tenant: parsed.tenant?.tokenKeychainEntry?.trim() ? parsed.tenant : null,
@@ -59,7 +85,12 @@ export function readState(file: string = STATE_FILE): MvpfyState {
   try {
     state = parseState(file);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+    // Setting the file aside is destructive, so it is reserved for the one
+    // case that earns it: the bytes were read and are not state. Every other
+    // failure is the filesystem saying "not now" — EACCES, EBUSY, EMFILE, a
+    // Windows file lock — and renaming the only copy of somebody's project
+    // list over a blip is a bad trade when retrying costs nothing.
+    if (error instanceof UnreadableState) {
       const aside = `${file}.corrupt-${Date.now()}`;
       try {
         fs.renameSync(file, aside);

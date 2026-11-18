@@ -96,6 +96,21 @@ describe('state store', () => {
     expect(fs.readFileSync(path.join(dir, aside[0]), 'utf8')).toBe('{"projects": [');
   });
 
+  it('leaves the file alone when the read itself failed, not the content', () => {
+    // EACCES, EBUSY, EMFILE, a Windows file lock: the filesystem saying "not
+    // now" says nothing about whether the file is state. Renaming somebody's
+    // only project list over a blip is a bad trade when retrying costs
+    // nothing — a directory where the file should be reproduces that shape.
+    writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'kept' })] }, file);
+    writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'kept' })] }, file);
+    fs.rmSync(file);
+    fs.mkdirSync(file); // reading it now throws EISDIR, not a parse error
+    expect(readState(file).projects.map((p) => p.id)).toEqual(['kept']);
+    expect(fs.readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+    expect(fs.existsSync(file)).toBe(true);
+    fs.rmSync(file, { recursive: true });
+  });
+
   it('takes the backup when a crash left no state.json between the two renames', () => {
     writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'kept' })] }, file);
     writeState({ ...structuredClone(DEFAULT_STATE), projects: [project({ id: 'kept' })] }, file);
