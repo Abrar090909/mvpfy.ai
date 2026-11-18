@@ -604,8 +604,10 @@ export default function SettingsView({
             <p className="text-[12.5px] text-muted">{updateLine}</p>
           </div>
           {/* Downloaded: the only thing left is the restart, so that is the
-              button. macOS cannot install an unsigned update, so there an
-              available one sends you to the download instead. */}
+              button. Every platform downloads on its own now, so "available"
+              means the download has not finished or did not happen — then the
+              button hands over the file itself rather than leaving them stuck
+              on a version they have been told is old. */}
           {update?.kind === 'downloaded' ? (
             <button
               onClick={() => installUpdate()}

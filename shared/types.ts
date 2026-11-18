@@ -592,10 +592,14 @@ export const RELEASES_URL = 'https://github.com/feature1-ai/mvpfy.ai/releases/la
 /**
  * Direct link to a version's macOS installer.
  *
- * Windows and Linux update themselves; macOS cannot install an update it
- * cannot verify, and these builds are unsigned. Sending someone to a releases
- * page to find the right file among eleven is the worst of both — this at
- * least starts the download of the one they want.
+ * Every platform updates itself now that the Mac builds are signed, so this is
+ * the fallback for the case where the app knows a version exists but does not
+ * have it: a download that failed, or one still running. Sending someone to a
+ * releases page to find the right file among eleven is the worst of both —
+ * this at least starts the download of the one they want.
+ *
+ * It is also the only route from a pre-signing build, which cannot update
+ * itself to a signed one at all.
  */
 export function macInstallerUrl(version: string): string {
   return (
