@@ -568,6 +568,25 @@ export function useProjectController(
     }
   }
 
+  // Read once per project view, with no dependencies: this describes the
+  // machine's Docker, which does not change while the app is open, and a
+  // person who changes it has to restart Docker Desktop anyway.
+  const [dockerAdvice, setDockerAdvice] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void window.mvpfy
+      .dockerAdvice()
+      .then((advice) => {
+        if (!cancelled) setDockerAdvice(advice);
+      })
+      .catch(() => {
+        // Not readable is not a finding; the report simply says less.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Each part of the product may read its own env file, so their paths are
   // only known after the inventory has been read — a second read, like the
   // bootstrap tasks' declared files, rather than a guess in the fixed list.
@@ -636,6 +655,7 @@ export function useProjectController(
     failedLog: lastFailure && lastEnvRun?.log.trim() ? lastEnvRun.log.slice(-4000) : null,
     unresponsive: appUnresponsive,
     stoppedServices,
+    hostAdvice: dockerAdvice,
   });
 
   const projectActions = useProjectActions(

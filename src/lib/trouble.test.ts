@@ -47,3 +47,41 @@ describe('troubleReport', () => {
     ).toContain('w: exited\n');
   });
 });
+
+describe('troubleReport host advice', () => {
+  it('reports the machine setup alongside the failure, and tells the agent whose it is', () => {
+    // The commonest "it will not start" on a laptop is a start that was only
+    // ever going to be slow, and an agent that cannot see that spends its
+    // time rewriting the compose file.
+    const report = troubleReport({
+      failedLog: 'health check timed out',
+      unresponsive: false,
+      stoppedServices: [],
+      hostAdvice: ['File sharing is not using VirtioFS.'],
+    });
+    expect(report).toContain('VirtioFS');
+    expect(report).toContain("human's settings");
+  });
+
+  it('stays silent about the machine when nothing is wrong with the run', () => {
+    // Standing advice is not a reason to declare the environment broken.
+    expect(
+      troubleReport({
+        failedLog: null,
+        unresponsive: false,
+        stoppedServices: [],
+        hostAdvice: ['File sharing is not using VirtioFS.'],
+      })
+    ).toBe('');
+  });
+
+  it('says nothing extra when there is no advice', () => {
+    const report = troubleReport({
+      failedLog: 'boom',
+      unresponsive: false,
+      stoppedServices: [],
+    });
+    expect(report).toContain('boom');
+    expect(report).not.toContain('slower than it has to be');
+  });
+});

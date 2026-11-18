@@ -59,7 +59,115 @@ function pickLocalContext(stdout: string): string | null {
 
 export function spawnEnv(): NodeJS.ProcessEnv {
   const ctx = localDockerContext();
-  return ctx ? { ...process.env, DOCKER_CONTEXT: ctx } : { ...process.env };
+  // BuildKit, explicitly, because the default depends on the engine's age and
+  // this one is old on plenty of laptops. It is worth asking for by name: it
+  // hashes the build context instead of shipping it whole, skips stages
+  // nothing depends on, builds independent stages at the same time, and is
+  // the only builder that honours `RUN --mount=type=cache`, which is what
+  // keeps a one-package change from reinstalling every dependency.
+  return {
+    ...process.env,
+    ...(ctx ? { DOCKER_CONTEXT: ctx } : {}),
+    DOCKER_BUILDKIT: '1',
+    COMPOSE_DOCKER_CLI_BUILD: '1',
+  };
+}
+
+/**
+ * What a build context must never carry.
+ *
+ * Without a .dockerignore, `docker build` tars the whole directory and sends
+ * it to the daemon before it reads the first line of the Dockerfile — and on
+ * a brownfield checkout almost all of that is the one thing the image is
+ * about to install for itself. Measured on mvpfy's own repository: 2.6 MB of
+ * tracked source under 406 MB of node_modules, so 157 times the payload for
+ * no effect on the image. mvpfy passes --build on every start, and on macOS
+ * that tar crosses the file-sharing boundary each time.
+ *
+ * Only directories a dev-mode image rebuilds from scratch anyway. Nothing
+ * here can change what lands in the image: the generated Dockerfile installs
+ * dependencies itself (the watcher rule requires the full tree in the image),
+ * and the source is bind-mounted over at run time regardless.
+ */
+const DOCKERIGNORE_LINES = [
+  '# Written by mvpfy because this build context had no .dockerignore.',
+  '# Everything here is reinstalled or rebuilt inside the image, so sending it',
+  '# only makes the build slower. Safe to edit; mvpfy will not rewrite it.',
+  '.git',
+  '.gitignore',
+  'node_modules',
+  '**/node_modules',
+  '.venv',
+  'venv',
+  '__pycache__',
+  '**/__pycache__',
+  '*.pyc',
+  '.mypy_cache',
+  '.pytest_cache',
+  '.gradle',
+  'vendor/bundle',
+  '.next',
+  '.nuxt',
+  '.svelte-kit',
+  '.turbo',
+  '.parcel-cache',
+  '.cache',
+  '*.log',
+  '.DS_Store',
+  // mvpfy's own scaffolding: the live .env in particular, which holds the
+  // local defaults and has no business baked into an image layer.
+  '.env',
+  '.mvpfy',
+  'mvpfy-*.md',
+  'mvpfy-*.json',
+];
+
+/**
+ * Give every build context a .dockerignore, but never replace one.
+ *
+ * Absent means the team never had one, so there is no behaviour to preserve —
+ * their own `docker build` was already shipping the whole checkout. Present
+ * means somebody made a decision, and a generated file is not better informed
+ * than they were.
+ *
+ * Returns the paths written, for the caller to report.
+ */
+export function ensureDockerignore(workspacePath: string): string[] {
+  const root = path.resolve(workspacePath);
+  const written: string[] = [];
+  // The root, plus one level down: mvpfy's layouts are a single repository at
+  // the workspace root, or one folder per repository inside it. A build
+  // context deeper than that belongs to a generated mock, which is small.
+  const candidates = [root];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    // No such workspace, or no permission to list it. Nothing to write.
+    return written;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') {
+      continue;
+    }
+    candidates.push(path.join(root, entry.name));
+  }
+  for (const dir of candidates) {
+    const ignore = path.join(dir, '.dockerignore');
+    // Only where something is actually built, so this never litters a folder
+    // that is not a build context.
+    const builds = ['Dockerfile', 'Dockerfile.mvpfy'].some((name) =>
+      fs.existsSync(path.join(dir, name))
+    );
+    if (!builds || fs.existsSync(ignore)) continue;
+    try {
+      fs.writeFileSync(ignore, `${DOCKERIGNORE_LINES.join('\n')}\n`, 'utf8');
+      written.push(ignore);
+    } catch {
+      // A read-only checkout is not a reason to fail the start.
+    }
+  }
+  return written;
 }
 
 // If the local daemon is down, launch Docker Desktop and wait for it
@@ -78,6 +186,85 @@ export const ENSURE_DAEMON = IS_WIN
       'open -a Docker >/dev/null 2>&1; ' +
       'for i in $(seq 1 45); do docker info >/dev/null 2>&1 && break; sleep 2; done; }'
     : 'docker info >/dev/null 2>&1 || { echo "Docker daemon is not running — start it (e.g. systemctl start docker) and retry."; exit 1; }';
+
+/**
+ * Docker Desktop's own settings, as they affect a bind-mount-heavy stack.
+ *
+ * mvpfy runs every app in development mode with the repository bind-mounted
+ * and a file watcher on it, so host file access is not a detail of the setup —
+ * it IS the setup. Docker Desktop's oldest file sharing (osxfs, then
+ * gRPC-FUSE) pays a syscall-per-operation round trip to the host; Apple's
+ * Virtualization framework with VirtioFS does not. Measured on one laptop
+ * with both switched off: 2000 small files took 5.27 s on a bind mount
+ * against 0.42 s on a volume inside the VM, and reading them back 6.09 s
+ * against 1.26 s. A dependency install, a bundler's first pass and a watcher's
+ * initial scan are all exactly that shape of work.
+ *
+ * Worth surfacing rather than fixing: these live in Docker Desktop's own
+ * preferences, and mvpfy has no business writing another application's
+ * settings file underneath the person using it.
+ *
+ * Pure, so the awkward part — a settings file whose shape changed across
+ * versions — is testable without a Docker install.
+ */
+export function fileSharingAdvice(settings: Record<string, unknown>): string[] {
+  const advice: string[] = [];
+  // Absent is not false: an old settings file simply has no such key, and
+  // claiming the fast path is off because a key is missing would be a guess.
+  // Only an explicit false is a finding.
+  const vz = settings.useVirtualizationFramework;
+  const virtiofs = settings.useVirtualizationFrameworkVirtioFS;
+  if (vz === false) {
+    advice.push(
+      "Docker Desktop is using the legacy virtual machine, not Apple's Virtualization " +
+        'framework. Settings → General → "Use Virtualization framework" turns it on, and is ' +
+        'the switch the next one depends on.'
+    );
+  }
+  if (virtiofs === false) {
+    advice.push(
+      'File sharing is not using VirtioFS, which is the slow part of running your code from ' +
+        'a bind mount. Settings → General → "VirtioFS" (it needs the Virtualization framework ' +
+        "above). Expect file-heavy work — installs, first page load, the watcher's first scan " +
+        '— to be several times faster.'
+    );
+  }
+  const memory = Number(settings.memoryMiB);
+  if (Number.isFinite(memory) && memory > 0 && memory < 6144) {
+    advice.push(
+      `Docker Desktop has ${Math.round(memory / 1024)} GB of memory. A product with a ` +
+        'database, a cache and two apps will swap inside the VM at that size; 8 GB is a ' +
+        'reasonable floor (Settings → Resources).'
+    );
+  }
+  return advice;
+}
+
+/**
+ * Read those settings off disk. Null when there is nothing to read — not
+ * installed, a different platform, a shape this does not recognise — which is
+ * different from "read it and found nothing wrong".
+ */
+export function dockerDesktopSettings(): Record<string, unknown> | null {
+  if (process.platform !== 'darwin') return null;
+  const home = process.env.HOME;
+  if (!home) return null;
+  const candidates = [
+    path.join(home, 'Library', 'Group Containers', 'group.com.docker', 'settings-store.json'),
+    path.join(home, 'Library', 'Group Containers', 'group.com.docker', 'settings.json'),
+  ];
+  for (const file of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // The next candidate, or none.
+    }
+  }
+  return null;
+}
 
 export function ideContainerName(workspacePath: string): string {
   const resolved = path.resolve(workspacePath);

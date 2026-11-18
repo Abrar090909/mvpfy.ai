@@ -675,6 +675,12 @@ export interface MvpfyApi {
   composeStatus(workspacePath: string): Promise<ServiceState[]>;
   /** Container states plus whether anything is still being logged. */
   composeProgress(workspacePath: string): Promise<ComposeProgress>;
+  /**
+   * Docker Desktop settings that make a bind-mounted stack slow, as advice.
+   * Empty when there is nothing to say, which includes every platform whose
+   * settings mvpfy cannot read.
+   */
+  dockerAdvice(): Promise<string[]>;
   /** Live IDE-container state from docker (stored idePort can go stale). */
   ideStatus(workspacePath: string): Promise<{ running: boolean; port: number | null }>;
   cliLogin(runId: string, tool: string): Promise<void>;

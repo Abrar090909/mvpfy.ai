@@ -17,8 +17,16 @@ export function troubleReport(input: {
   /** The app started but never answered: a failure with no failed run. */
   unresponsive: boolean;
   stoppedServices: ServiceState[];
+  /**
+   * Standing facts about this machine's Docker, not failures of this run.
+   * Included because the commonest shape of "it will not start" on a laptop
+   * is a start that was only ever going to be slow — a health check giving up
+   * on a stack whose file access is several times slower than it needs to be.
+   * An agent that cannot see that spends its time in the compose file.
+   */
+  hostAdvice?: string[];
 }): string {
-  const { failedLog, unresponsive, stoppedServices } = input;
+  const { failedLog, unresponsive, stoppedServices, hostAdvice = [] } = input;
   if (!failedLog && !unresponsive && stoppedServices.length === 0) return '';
 
   const parts: string[] = [];
@@ -39,6 +47,17 @@ export function troubleReport(input: {
   }
   if (failedLog) {
     parts.push(`Tail of the last environment run:\n---\n${failedLog}\n---`);
+  }
+  if (hostAdvice.length > 0) {
+    // Last, and labelled as the machine's setup: it explains slowness, it is
+    // rarely the whole cause, and an agent that reads it first will change
+    // Docker Desktop's settings instead of fixing the stack.
+    parts.push(
+      "This machine's Docker setup is also making everything here slower than it has to " +
+        `be:\n${hostAdvice.map((line) => `• ${line}`).join('\n')}\n` +
+        "These are the human's settings to change, not yours — mention them, do not try " +
+        'to work around them in the compose file.'
+    );
   }
   return `THE ENVIRONMENT IS NOT WORKING RIGHT NOW.\n\n${parts.join('\n\n')}`;
 }

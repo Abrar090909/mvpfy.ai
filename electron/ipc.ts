@@ -29,6 +29,9 @@ import {
 } from './services/cli';
 import {
   composeCommand,
+  dockerDesktopSettings,
+  ensureDockerignore,
+  fileSharingAdvice,
   restartServiceCommand,
   composeProgress,
   composeStatus,
@@ -165,6 +168,12 @@ export function registerIpc(ready: Promise<unknown> = Promise.resolve()): void {
       'docker compose is restricted to managed and linked project directories'
     );
     const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
+    // Before anything builds, not at bootstrap: the compose file is rewritten
+    // between runs and a repository can be added to a project later, so the
+    // set of build contexts is only settled now.
+    if (action === 'up' || action === 'restart' || action === 'rebuild') {
+      ensureDockerignore(resolved);
+    }
     startRun(runId, composeCommand(action, linked), resolved);
   });
   handle('restart-service', (_ev, runId: string, repoPath: string, service: string) => {
@@ -173,6 +182,9 @@ export function registerIpc(ready: Promise<unknown> = Promise.resolve()): void {
       'docker compose is restricted to managed and linked project directories'
     );
     const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
+    // This one builds too (--build, so a value baked in at build time is
+    // picked up), so it pays the same context cost.
+    ensureDockerignore(resolved);
     startRun(runId, restartServiceCommand(service, linked), resolved);
   });
   handle(
@@ -228,6 +240,10 @@ export function registerIpc(ready: Promise<unknown> = Promise.resolve()): void {
     const linked = isLinkedPath(resolved) && !isManagedPath(resolved);
     return composeProgress(resolved, linked);
   });
+  // No workspace: this is about the machine, not a project. Reads another
+  // application's preferences and never writes them — which switches are on is
+  // the person's decision, and mvpfy's job is only to say what they cost here.
+  handle('docker-advice', () => fileSharingAdvice(dockerDesktopSettings() ?? {}));
   handle('ide-status', (_ev, workspacePath: string) => {
     const resolved = allowedWorkspace(
       workspacePath,

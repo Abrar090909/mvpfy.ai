@@ -1,10 +1,12 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   ENSURE_DAEMON,
   composeCommand,
+  ensureDockerignore,
+  fileSharingAdvice,
   ideCommand,
   ideContainerName,
   legacyIdeContainerName,
@@ -12,6 +14,7 @@ import {
   parseInspectEnv,
   restartServiceCommand,
   seedCommandFor,
+  spawnEnv,
 } from './docker';
 import { IS_WIN, spawnShellSync } from './shell';
 
@@ -352,5 +355,116 @@ describe('the Docker daemon guard, run by the real shell', () => {
     expect(res.stdout).not.toContain('COMMAND-RAN');
     expect(res.stdout).toMatch(/not running/);
     expect(res.status).not.toBe(0);
+  });
+});
+
+describe('ensureDockerignore', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mvpfy-dockerignore-'));
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const read = (...p: string[]) => fs.readFileSync(path.join(dir, ...p), 'utf8');
+
+  it('keeps the dependency tree out of a build context that had no .dockerignore', () => {
+    // The whole point: a brownfield checkout is a few megabytes of source
+    // under several hundred of node_modules, and all of it was being tarred
+    // and shipped to the daemon on every start.
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:20\n');
+    const written = ensureDockerignore(dir);
+    expect(written).toEqual([path.join(dir, '.dockerignore')]);
+    const text = read('.dockerignore');
+    expect(text).toContain('node_modules');
+    expect(text).toContain('**/node_modules');
+    expect(text).toContain('.git');
+  });
+
+  it('never replaces one somebody already wrote', () => {
+    // Present means a decision was made, and a generated file is not better
+    // informed than whoever made it.
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:20\n');
+    fs.writeFileSync(path.join(dir, '.dockerignore'), 'only-this\n');
+    expect(ensureDockerignore(dir)).toEqual([]);
+    expect(read('.dockerignore')).toBe('only-this\n');
+  });
+
+  it('writes nothing where nothing is built, so it cannot litter', () => {
+    fs.writeFileSync(path.join(dir, 'README.md'), '# not a build context\n');
+    expect(ensureDockerignore(dir)).toEqual([]);
+    expect(fs.existsSync(path.join(dir, '.dockerignore'))).toBe(false);
+  });
+
+  it('covers each repository of a multi-repository workspace', () => {
+    // A project can grow a repository after it was created, and each one is
+    // its own build context with its own dependency tree.
+    for (const repo of ['frontend', 'backend']) {
+      fs.mkdirSync(path.join(dir, repo));
+      fs.writeFileSync(path.join(dir, repo, 'Dockerfile'), 'FROM node:20\n');
+    }
+    const written = ensureDockerignore(dir);
+    expect(written).toHaveLength(2);
+    expect(read('frontend', '.dockerignore')).toContain('node_modules');
+    expect(read('backend', '.dockerignore')).toContain('node_modules');
+  });
+
+  it('keeps the live env file out of an image layer', () => {
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:20\n');
+    ensureDockerignore(dir);
+    expect(read('.dockerignore').split('\n')).toContain('.env');
+  });
+
+  it('survives a workspace that is not there', () => {
+    expect(ensureDockerignore(path.join(dir, 'nope'))).toEqual([]);
+  });
+});
+
+describe('spawnEnv', () => {
+  it('asks for BuildKit by name, rather than depending on the engine default', () => {
+    // It is the only builder that honours RUN --mount=type=cache, and the
+    // default varies with the engine's age.
+    const env = spawnEnv();
+    expect(env.DOCKER_BUILDKIT).toBe('1');
+    expect(env.COMPOSE_DOCKER_CLI_BUILD).toBe('1');
+  });
+});
+
+describe('fileSharingAdvice', () => {
+  it('names both switches when Docker Desktop is on the legacy VM', () => {
+    const advice = fileSharingAdvice({
+      useVirtualizationFramework: false,
+      useVirtualizationFrameworkVirtioFS: false,
+    });
+    expect(advice).toHaveLength(2);
+    expect(advice.join(' ')).toContain('Virtualization framework');
+    expect(advice.join(' ')).toContain('VirtioFS');
+  });
+
+  it('says nothing when the fast path is already on', () => {
+    expect(
+      fileSharingAdvice({
+        useVirtualizationFramework: true,
+        useVirtualizationFrameworkVirtioFS: true,
+        memoryMiB: 8192,
+      })
+    ).toEqual([]);
+  });
+
+  it('treats a missing key as unknown rather than off', () => {
+    // Settings files changed shape across versions, and reporting a problem
+    // because a key is absent is a guess dressed as a finding.
+    expect(fileSharingAdvice({})).toEqual([]);
+    expect(fileSharingAdvice({ memoryMiB: 8192 })).toEqual([]);
+  });
+
+  it('flags a VM too small for a database and two apps', () => {
+    const advice = fileSharingAdvice({ memoryMiB: 4096 });
+    expect(advice).toHaveLength(1);
+    expect(advice[0]).toContain('4 GB');
+  });
+
+  it('does not flag memory it cannot read', () => {
+    expect(fileSharingAdvice({ memoryMiB: 'unknown' })).toEqual([]);
+    expect(fileSharingAdvice({ memoryMiB: 0 })).toEqual([]);
   });
 });

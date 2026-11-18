@@ -297,6 +297,35 @@ Rules:
   dependency rule above: a Dockerfile written to ship the product installs production
   dependencies only, and the watcher will not be in it.
 • Use official base images only.
+• Give every build context a .dockerignore, and put the dependency and VCS directories in
+  it: .git, node_modules (and **/node_modules), .venv, __pycache__, vendor/bundle, .next,
+  .gradle, build caches, logs. Without one, `docker build` tars the entire directory and
+  ships it to the daemon BEFORE it reads the Dockerfile — and on a brownfield checkout
+  nearly all of that is the dependency tree the image is about to install for itself. A
+  typical repository is a couple of megabytes of source under several hundred of
+  node_modules, so the context is a hundred times larger than anything that affects the
+  image, and mvpfy builds on every start. If a .dockerignore already exists, add the
+  missing entries and leave the rest of it alone.
+• Install dependencies through a BuildKit cache mount so a one-package change does not
+  reinstall everything:
+    RUN --mount=type=cache,target=/root/.npm npm ci
+  (pip: target=/root/.cache/pip; bundler: /usr/local/bundle/cache; go: /root/.cache/go-build;
+  maven: /root/.m2; gradle: /root/.gradle). Copy the manifest and lockfile and install BEFORE
+  copying the rest of the source, so editing a source file does not invalidate the install
+  layer. These two together are the difference between a rebuild of seconds and one of
+  minutes, and the PM pays that difference every time a story adds a package.
+• Do NOT turn on polling file watchers. CHOKIDAR_USEPOLLING, WATCHPACK_POLLING,
+  --poll, uvicorn's --reload-delay with a forced poller: every one of them makes the watcher
+  re-stat the whole tree several times a second, which on a large repository is a pegged
+  core, a hot laptop, and a slower app than no watcher at all. They are a workaround for an
+  environment where host edits do not reach the container, and that is not this one —
+  Docker Desktop maps host file events into the container, so the framework's native
+  watcher sees an edit on its own. Use the native watcher, and if a watcher genuinely
+  misses changes, say so in mvpfy-run.md rather than reaching for polling.
+• Point every watcher away from the directories it must not walk. A watcher that recurses
+  into node_modules, .git or a build output directory spends its startup there and holds
+  thousands of file handles open: set the framework's ignore list (nodemon's `ignore`,
+  vite's `server.watch.ignored`, webpack's `watchOptions.ignored`) to exclude them.
 • Keep images SLIM — builds run on a PM's laptop and network. Do not apt-get compiler
   toolchains or large packages (chromium, g++, libvips-dev, …) unless the app provably
   needs them: modern npm packages ship prebuilt binaries (sharp needs no libvips build,
