@@ -685,3 +685,46 @@ describe('setting up after a repository is added', () => {
     expect(prompt).not.toMatch(/REGENERATED|EXTEND what is here/);
   });
 });
+
+describe('the watcher rule in the bootstrap prompt', () => {
+  const winProject = () =>
+    ({
+      id: 'p',
+      localPath: 'C:\\Users\\x\\.mvpfy\\shop',
+      basePort: 4100,
+      repos: [],
+    }) as unknown as Project;
+  const macProject = () =>
+    ({
+      id: 'p',
+      localPath: '/Users/x/.mvpfy/shop',
+      basePort: 4100,
+      repos: [],
+    }) as unknown as Project;
+
+  it('reaches the real prompt, placeholder and all', () => {
+    // The rule lives in a module and the prompt carries {watcherNote}, so a
+    // renamed key would leave the brace sitting in the text unreplaced and
+    // the agent with no rule at all — which no test of the module would see.
+    const prompt = buildBootstrapPrompt(macProject(), false, false);
+    expect(prompt).not.toContain('{watcherNote}');
+    expect(prompt).toMatch(/Do NOT turn on polling/);
+  });
+
+  it('tells a Windows host to poll and a Mac not to', () => {
+    expect(buildBootstrapPrompt(winProject(), false, true)).toMatch(/REQUIRES polling/);
+    expect(buildBootstrapPrompt(macProject(), false, false)).not.toMatch(/REQUIRES polling/);
+  });
+
+  it('leaves no other placeholder unfilled', () => {
+    // Cheap guard on the whole template: fillTemplate silently leaves an
+    // unknown key in place, so an unreplaced brace is how a prompt ships with
+    // instructions missing.
+    //
+    // `${VAR}` is exempt because it is not a placeholder at all — it is the
+    // compose file's own variable syntax, quoted in the prompt as something
+    // for the agent to write. The two only coexist because no template key is
+    // ever named the same as a variable the prompt mentions.
+    expect(buildBootstrapPrompt(macProject(), false, false)).not.toMatch(/(?<!\$)\{\w+\}/);
+  });
+});

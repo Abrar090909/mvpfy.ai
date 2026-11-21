@@ -1,6 +1,7 @@
 import bootstrapTemplate from '../prompts/bootstrap-runtime.txt?raw';
 import type { RunsApi } from './useRuns';
 import { implementGrounding, specGrounding } from './grounding';
+import { watcherNote } from './watchers';
 import bootstrapPlanTemplate from '../prompts/bootstrap-plan.txt?raw';
 import readinessTemplate from '../prompts/launch-readiness.txt?raw';
 import readinessFixTemplate from '../prompts/readiness-fix.txt?raw';
@@ -298,7 +299,21 @@ function agentFor(
     : { agent: 'claude', ...(settings.claudeModel ? { model: settings.claudeModel } : {}) };
 }
 
-export function buildBootstrapPrompt(project: Project, regenerate = false): string {
+/** The host mvpfy is running on, which the renderer only knows this way. */
+export function onWindowsHost(): boolean {
+  return navigator.userAgent.includes('Windows');
+}
+
+/**
+ * `onWindows` is a parameter rather than read inside, because what it decides
+ * — whether the generated stack polls for file changes — is worth testing
+ * both ways, and a test cannot be on two operating systems.
+ */
+export function buildBootstrapPrompt(
+  project: Project,
+  regenerate = false,
+  onWindows = onWindowsHost()
+): string {
   const extending = project.reposPendingSetup ?? [];
   return fillTemplate(bootstrapTemplate, {
     repoPath: project.localPath,
@@ -308,6 +323,7 @@ export function buildBootstrapPrompt(project: Project, regenerate = false): stri
     // to be added is asking for that, not for its stack to be rewritten.
     regenerateNote: extending.length > 0 ? extendNoteFor(extending) : regenerateNoteFor(regenerate),
     bootstrapFile: configDirFor(project.mode) + BOOTSTRAP_FILE,
+    watcherNote: watcherNote({ workspacePath: project.localPath, onWindows }),
   });
 }
 
@@ -562,7 +578,7 @@ export async function startInstallToolsRun(
     runId,
     repoPath: '',
     promptText: fillTemplate(installToolsTemplate, {
-      platform: navigator.userAgent.includes('Windows') ? 'Windows' : 'macOS',
+      platform: onWindowsHost() ? 'Windows' : 'macOS',
       missing: missing.join(', '),
       // The tail: the reason a run failed is at the end of it, and the whole
       // log of four installers is mostly download progress.

@@ -314,14 +314,7 @@ Rules:
   copying the rest of the source, so editing a source file does not invalidate the install
   layer. These two together are the difference between a rebuild of seconds and one of
   minutes, and the PM pays that difference every time a story adds a package.
-• Do NOT turn on polling file watchers. CHOKIDAR_USEPOLLING, WATCHPACK_POLLING,
-  --poll, uvicorn's --reload-delay with a forced poller: every one of them makes the watcher
-  re-stat the whole tree several times a second, which on a large repository is a pegged
-  core, a hot laptop, and a slower app than no watcher at all. They are a workaround for an
-  environment where host edits do not reach the container, and that is not this one —
-  Docker Desktop maps host file events into the container, so the framework's native
-  watcher sees an edit on its own. Use the native watcher, and if a watcher genuinely
-  misses changes, say so in mvpfy-run.md rather than reaching for polling.
+{watcherNote}
 • Point every watcher away from the directories it must not walk. A watcher that recurses
   into node_modules, .git or a build output directory spends its startup there and holds
   thousands of file handles open: set the framework's ignore list (nodemon's `ignore`,
